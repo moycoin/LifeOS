@@ -25,6 +25,14 @@
 
 </div>
 
+---
+
+## 📸 Screenshot / スクリーンショット
+
+![LifeOS GUI](screenshot.png)
+
+---
+
 ## 🎯 Overview / 概要
 
 LifeOS is a comprehensive biometric monitoring and productivity optimization system.
