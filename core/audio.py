@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Life OS v5.8.0 - Neuro-Acoustic Module (Neural Entrainment Algorithm)"""
 import hashlib
 import io
 import json
@@ -15,6 +14,7 @@ from collections import Counter, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from .types import __version__, now_jst
 try:
     import numpy as np
     NUMPY_AVAILABLE = True
@@ -1176,5 +1176,5 @@ class NeuroSoundController:
         return {'current_mode': self.engine.current_mode, 'last_state': self.last_state, 'elapsed_since_switch': elapsed, 'inertia_seconds': self.inertia_seconds, 'can_switch': elapsed > self.inertia_seconds, 'idle_mode': self.engine.is_idle_mode()}
 
 if __name__ == "__main__":
-    print(f"=== NeuroSoundEngine v5.2.1 (Zone Support) ===")
+    print(f"=== NeuroSoundEngine {__version__} (Zone Support) ===")
     print(f"NumPy: {NUMPY_AVAILABLE} | SciPy: {SCIPY_AVAILABLE} | Pygame: {PYGAME_AVAILABLE} | Requests: {REQUESTS_AVAILABLE}")

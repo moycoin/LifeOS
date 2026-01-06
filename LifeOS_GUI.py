@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Life OS v5.4.1 - Extended Time Horizon + LAST SYNC Display
-v5.4.1: 取得範囲72時間、LAST SYNC表示追加、Dual-Layer Widget
-"""
+# LifeOS GUI - Version from core.types.__version__
 import bisect
 import sys
 import os
@@ -48,6 +45,7 @@ except ImportError:
 
 # types.pyから共通定義をインポート
 from core.types import (
+    __version__,
     JST,
     now_jst,
     Colors,
@@ -58,24 +56,23 @@ from core.types import (
     Snapshot,
     HYDRATION_INTERVAL_MINUTES,
     AUTO_BREAK_IDLE_SECONDS,
+    safe_read_json,
+    safe_write_json,
 )
-
-
-# ==================== パス解決 ====================
 def get_root_path() -> Path:
     return Path(__file__).parent.resolve()
-
 ROOT_PATH = get_root_path()
-
+class NoScrollSpinBox(QSpinBox):
+    def wheelEvent(self, event): event.ignore()
+class NoScrollDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event): event.ignore()
 if str(ROOT_PATH) not in sys.path:
     sys.path.insert(0, str(ROOT_PATH))
-
 try:
     from core.database import LifeOSDatabase
     DB_AVAILABLE = True
 except ImportError:
     DB_AVAILABLE = False
-
 try:
     from core.engine import BioEngine
     ENGINE_AVAILABLE = True
@@ -102,8 +99,6 @@ except ImportError:
             return {'effective_fp': 100, 'current_load': 0, 'estimated_readiness': 75}
         def get_prediction_bars(self, hours=8):
             return []
-
-# v4.2.1: NeuroSoundEngine (分離インポート + エラー可視化)
 try:
     from core.audio import NeuroSoundEngine
     AUDIO_ENGINE_AVAILABLE = True
@@ -118,8 +113,6 @@ except Exception as e:
     traceback.print_exc()
     AUDIO_ENGINE_AVAILABLE = False
     NeuroSoundEngine = None
-
-# v4.2.1: NeuroSoundController (オプショナル + エラー可視化)
 try:
     from core.audio import NeuroSoundController
     print("[AudioImport] NeuroSoundController: OK")
@@ -129,60 +122,6 @@ except ImportError as e:
 except Exception as e:
     print(f"[AudioImport] NeuroSoundController error: {e}")
     NeuroSoundController = None
-
-
-# ==================== JSON ====================
-def safe_read_json(path: Path, default: Dict = None, max_retries: int = 3) -> Dict:
-    """
-    v4.1.1: リトライ付きJSON読み込み
-    
-    PermissionError/OSError発生時、最大3回リトライ（0.1秒待機）
-    """
-    if default is None:
-        default = {}
-    
-    for attempt in range(max_retries):
-        try:
-            if not path.exists():
-                return default.copy()
-            content = path.read_text(encoding='utf-8').strip()
-            if not content:
-                return default.copy()
-            return json.loads(content)
-        except (PermissionError, OSError):
-            if attempt < max_retries - 1:
-                time.sleep(0.1)
-        except:
-            return default.copy()
-    
-    # すべてのリトライが失敗
-    return default.copy()
-
-
-def safe_write_json(path: Path, data: Dict, max_retries: int = 3) -> bool:
-    """
-    v4.1.1: リトライ付きJSON書き込み
-    
-    PermissionError/OSError発生時、最大3回リトライ（0.1秒待機）
-    """
-    for attempt in range(max_retries):
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = path.with_suffix('.tmp')
-            temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-            temp_path.replace(path)
-            return True
-        except (PermissionError, OSError):
-            if attempt < max_retries - 1:
-                time.sleep(0.1)
-        except:
-            return False
-    
-    # すべてのリトライが失敗
-    return False
-
-
-# Config
 CONFIG_PATH = ROOT_PATH / "config.json"
 config = safe_read_json(CONFIG_PATH, {
     "oura": {"api_token": ""},
@@ -193,15 +132,36 @@ config = safe_read_json(CONFIG_PATH, {
     },
     "system": {"volume": 1.0, "idle_threshold_minutes": 10}
 })
-
 STATE_PATH = ROOT_PATH / "logs" / "daemon_state.json"
-PID_PATH = ROOT_PATH / "logs" / "daemon.pid"  # v3.3.3
-STYLE_PATH = ROOT_PATH / "Data" / "style.qss"  # v3.3.3
+PID_PATH = ROOT_PATH / "logs" / "daemon.pid"
+STYLE_PATH = ROOT_PATH / "Data" / "style.qss"
 IDEAL_SLEEP_SECONDS = 8 * 3600
-
-
+DB_PATH = ROOT_PATH / "Data" / "life_os.db"
+gui_db: Optional['LifeOSDatabase'] = None
+def get_gui_db() -> Optional['LifeOSDatabase']:
+    global gui_db
+    if gui_db is None and DB_AVAILABLE:
+        try:
+            gui_db = LifeOSDatabase(str(DB_PATH))
+        except Exception as e:
+            print(f"[GUI] DB init failed: {e}")
+    return gui_db
+def gui_push_command(cmd: str, value=None):
+    """GUI用コマンドプッシュ（DBベース）"""
+    db = get_gui_db()
+    if db:
+        db.push_command(cmd, value)
+def get_state_from_db() -> Dict:
+    """DB完全依存: daemon_state + oura_cache + brain_metricsを結合"""
+    db = get_gui_db()
+    if not db:
+        return {'brain_state': {'effective_fp': 75.0, 'status_code': 'NO_DATABASE', 'activity_state': 'IDLE'}, 'oura_details': {}}
+    try:
+        return db.get_combined_state()
+    except Exception as e:
+        print(f"[GUI] DB read failed: {e}")
+        return {'brain_state': {'effective_fp': 75.0, 'status_code': 'DB_ERROR', 'activity_state': 'IDLE'}, 'oura_details': {}}
 def load_stylesheet() -> str:
-    """v3.3.3: QSSファイルを読み込む"""
     try:
         if STYLE_PATH.exists():
             return STYLE_PATH.read_text(encoding='utf-8')
@@ -270,117 +230,6 @@ class GlobalInputListener:
 
 
 input_listener = GlobalInputListener()
-
-
-# ==================== v4.2.1: Shadow HR Kinetics ====================
-class ShadowKineticsSolver:
-    """
-    v4.2.1: 自律神経応答を模倣したHR追従ソルバー
-    
-    生理学的背景:
-    - 交感神経（Fight-or-Flight）: 心拍数を急速に上昇させる
-    - 副交感神経（Rest-and-Digest）: 心拍数を緩やかに低下させる
-    
-    非対称時定数モデル:
-    - Attack (上昇時): tau_attack = 0.5秒 (急速応答)
-    - Decay (下降時): tau_decay = 45秒 (緩慢な回復)
-    
-    計算式:
-    d_bpm/dt = (target - current) / tau
-    current += d_bpm * dt
-    
-    ここで tau は方向に依存:
-    - target > current → tau = tau_attack (交感神経優位)
-    - target < current → tau = tau_decay (副交感神経優位)
-    """
-    
-    # 時定数（秒）
-    TAU_ATTACK = 0.5    # 上昇時: 0.5秒で63%追従
-    TAU_DECAY = 45.0    # 下降時: 45秒で63%追従
-    
-    # 生理的制限
-    MIN_BPM = 40
-    MAX_BPM = 180
-    
-    def __init__(self, initial_bpm: float = 65.0):
-        """
-        Args:
-            initial_bpm: 初期心拍数（起動時のRHRなど）
-        """
-        self._current_bpm = float(initial_bpm)
-        self._target_bpm = float(initial_bpm)
-        self._last_update = time.time()
-    
-    def set_target(self, target_bpm: float):
-        """
-        目標心拍数を設定
-        
-        Args:
-            target_bpm: shadow_hr.predict()からの予測値
-        """
-        self._target_bpm = max(self.MIN_BPM, min(self.MAX_BPM, float(target_bpm)))
-    
-    def update(self, dt: float = None) -> float:
-        """
-        1ステップ更新して現在の生理的HR値を返す
-        
-        Args:
-            dt: 経過時間（秒）。Noneの場合は前回からの実時間を使用
-        
-        Returns:
-            生理的にシミュレートされた現在HR
-        """
-        now = time.time()
-        if dt is None:
-            dt = now - self._last_update
-        self._last_update = now
-        
-        # 方向に応じた時定数を選択
-        delta = self._target_bpm - self._current_bpm
-        
-        if abs(delta) < 0.1:
-            # 十分近い場合は収束とみなす
-            return self._current_bpm
-        
-        if delta > 0:
-            # 上昇（交感神経優位）: 急速追従
-            tau = self.TAU_ATTACK
-        else:
-            # 下降（副交感神経優位）: 緩慢回復
-            tau = self.TAU_DECAY
-        
-        # 一次遅れ系: dx/dt = (target - x) / tau
-        # 解析解: x(t) = target + (x0 - target) * exp(-t/tau)
-        # 差分近似: dx = (target - x) * (1 - exp(-dt/tau))
-        decay_factor = 1.0 - math.exp(-dt / tau)
-        d_bpm = delta * decay_factor
-        
-        self._current_bpm += d_bpm
-        self._current_bpm = max(self.MIN_BPM, min(self.MAX_BPM, self._current_bpm))
-        
-        return self._current_bpm
-    
-    def get_current(self) -> float:
-        """現在の生理的HR値を取得（更新なし）"""
-        return self._current_bpm
-    
-    def reset(self, bpm: float):
-        """状態をリセット（実測HR取得時など）"""
-        self._current_bpm = float(bpm)
-        self._target_bpm = float(bpm)
-        self._last_update = time.time()
-    
-    def get_state(self) -> Dict:
-        """デバッグ用の状態取得"""
-        return {
-            'current_bpm': round(self._current_bpm, 1),
-            'target_bpm': round(self._target_bpm, 1),
-            'delta': round(self._target_bpm - self._current_bpm, 1),
-            'mode': 'attack' if self._target_bpm > self._current_bpm else 'decay',
-        }
-
-
-# ==================== Helpers ====================
 def get_average_sleep_from_db(days: int = 14) -> Optional[float]:
     try:
         db_path = ROOT_PATH / "Data" / "life_os.db"
@@ -425,12 +274,12 @@ class SmoothProgressBar(QProgressBar):
 # ==================== Trinity Circle Widget (v2.6 Style) ====================
 class TrinityCircleWidget(QWidget):
     """
-    v3.4.2 Trinity Circle
+    v6.0.1 Trinity Circle
     - Outer: Readiness (Cyan)
     - Middle: FP (Orange)  
     - Inner: Cognitive Load (Red)
     
-    v3.4.2: ラベル位置を cy + size * 0.08 に設定
+    v6.0.1: ラベル位置を cy + size * 0.08 に設定
     """
     def __init__(self):
         super().__init__()
@@ -593,37 +442,33 @@ class ResourceTimelineWidget(QWidget):
             painter.drawText(int(margin_left + bar_area_width + 8), int(y + 14), f"{int(fp)} FP")
 
 
-# ==================== Resource Curve Widget (v3.4 New) ====================
+# ==================== Resource Curve Widget (v6.0.2 SSOT) ====================
 class ResourceCurveWidget(QWidget):
-    """
-    v3.4 Resource Curve Widget
-    BioEngine.predict_trajectory の結果を曲線グラフで描画
-    
-    - X軸: 現在〜4時間後 (+0h, +1h, +2h, +4h)
-    - Y軸: FP (0-100)
-    - Continue曲線: オレンジ (#FF6B00)
-    - Rest曲線: シアン破線 (#00D4AA)
-    """
-    
+    """v6.0.2 Resource Curve Widget - SSOT対応（辞書形式予測データ）"""
     COLOR_CONTINUE = '#FF6B00'
     COLOR_REST = '#00D4AA'
-    
     def __init__(self):
         super().__init__()
         self.continue_points = []
         self.rest_points = []
         self.setMinimumSize(300, 140)
-    
     def set_data(self, prediction: Dict):
-        """
-        prediction: {'continue': [PredictionPoint, ...], 'rest': [...]}
-        """
+        """v6.0.2: daemon_state.jsonからの辞書形式予測データに対応"""
         if not prediction:
             self.continue_points = []
             self.rest_points = []
         else:
-            self.continue_points = prediction.get('continue', [])
-            self.rest_points = prediction.get('rest', [])
+            now = now_jst()
+            cont_raw = prediction.get('continue', [])
+            rest_raw = prediction.get('rest', [])
+            if cont_raw and isinstance(cont_raw[0], dict):
+                self.continue_points = [type('P', (), {'timestamp': now + timedelta(minutes=p.get('minutes', 0)), 'fp': p.get('fp', 0)})() for p in cont_raw]
+            else:
+                self.continue_points = cont_raw
+            if rest_raw and isinstance(rest_raw[0], dict):
+                self.rest_points = [type('P', (), {'timestamp': now + timedelta(minutes=p.get('minutes', 0)), 'fp': p.get('fp', 0)})() for p in rest_raw]
+            else:
+                self.rest_points = rest_raw
         self.update()
     
     def paintEvent(self, event):
@@ -731,12 +576,12 @@ class ResourceCurveWidget(QWidget):
                    margin_left, margin_top, graph_width, graph_height,
                    color, dashed=False):
         """
-        v3.4.5: 曲線を描画（FP=10区間は赤色で強調）
+        v6.0.1: 曲線を描画（FP=10区間は赤色で強調）
         """
         if not points or len(points) < 2:
             return
         
-        # v3.4.5: 通常区間と枯渇区間を分けて描画
+        # v6.0.1: 通常区間と枯渇区間を分けて描画
         DEPLETED_THRESHOLD = 12  # FP < 12 を枯渇とみなす
         DEPLETED_COLOR = Colors.RED
         
@@ -789,7 +634,7 @@ class ResourceCurveWidget(QWidget):
                                    dashed)
     
     def _draw_path_segment(self, painter, path, color, dashed=False):
-        """v3.4.5: パスセグメントを描画"""
+        """v6.0.1: パスセグメントを描画"""
         if dashed:
             pen = QPen(QColor(color), 2, Qt.DashLine)
         else:
@@ -852,7 +697,7 @@ class InfoCardWidget(QWidget):
 # ==================== Telemetry Strip (v2.6 Style) ====================
 class TelemetryStripWidget(QWidget):
     """
-    v3.4.6 Telemetry Strip - 細いライン (高さ4px)
+    v6.0.1 Telemetry Strip - 細いライン (高さ4px)
     入力時に発光（輝度抑制版）
     """
     def __init__(self):
@@ -874,35 +719,42 @@ class TelemetryStripWidget(QWidget):
     def _on_input(self):
         self.glow_intensity = 1.0
         self.pulses.append({'x': 0.5, 'intensity': 1.0})
-        
-        # v4.0: シーシャ離席中かつBGMフェードアウト中なら復帰
         self._check_shisha_resume()
-    
-    def _check_shisha_resume(self):
-        """v4.2.2: シーシャ復帰チェック（終了後、PCに触ったら再開）"""
+        self._check_sleep_wake()
+    def _check_sleep_wake(self):
+        """v6.1.0: 就寝中にPC操作検出でモニタ復帰（DB参照）"""
         try:
-            state = safe_read_json(STATE_PATH, {})
-            is_shisha_active = state.get('is_shisha_active', False)
-            audio_faded_out = state.get('audio_faded_out', False)
-            
-            # v4.2.2: シーシャ終了後かつフェードアウト中のみ復帰
-            if audio_faded_out and not is_shisha_active:
-                # フェードアウト状態を解除
-                state['audio_faded_out'] = False
-                safe_write_json(STATE_PATH, state)
-                
-                # NeuroSoundEngineのresume_from_shisha()を呼び出し
+            state = get_state_from_db()
+            if state.get('is_sleeping', False):
+                gui_push_command('WAKE_MONITORS')
                 app = QApplication.instance()
                 if app:
                     for widget in app.topLevelWidgets():
-                        if hasattr(widget, 'dashboard_tab'):
-                            dashboard = widget.dashboard_tab
-                            if hasattr(dashboard, 'neuro_sound') and dashboard.neuro_sound:
-                                dashboard.neuro_sound.resume_from_shisha()
-                                print("[InputBar] Resuming audio - user returned")
+                        if hasattr(widget, 'home_tab'):
+                            home = widget.home_tab
+                            if hasattr(home, 'ambient_sync') and home.ambient_sync:
+                                home.ambient_sync.wake_monitors()
                                 break
-        except Exception as e:
-            pass  # サイレント処理
+        except Exception:
+            pass
+    def _check_shisha_resume(self):
+        """v6.1.0: シーシャ復帰チェック（NeuroSound内部状態で管理）"""
+        try:
+            state = get_state_from_db()
+            is_shisha_active = state.get('is_shisha_active', False)
+            app = QApplication.instance()
+            if app and not is_shisha_active:
+                for widget in app.topLevelWidgets():
+                    if hasattr(widget, 'dashboard_tab'):
+                        dashboard = widget.dashboard_tab
+                        if hasattr(dashboard, 'neuro_sound') and dashboard.neuro_sound:
+                            ns = dashboard.neuro_sound
+                            if hasattr(ns, '_shisha_faded_out') and ns._shisha_faded_out:
+                                ns.resume_from_shisha()
+                                ns._shisha_faded_out = False
+                            break
+        except Exception:
+            pass
     
     def _tick(self):
         self.glow_intensity *= 0.9
@@ -922,20 +774,16 @@ class TelemetryStripWidget(QWidget):
         base_color = QColor(Colors.BORDER)
         painter.fillRect(0, 0, width, height, base_color)
         
-        # v3.4.6: Glow（輝度抑制: 200→100）
+        # v6.0.1: Glow（輝度抑制: 200→100）
         if self.glow_intensity > 0.05:
             glow = QColor(Colors.CYAN)
             glow.setAlpha(int(self.glow_intensity * 100))  # 200→100
             painter.fillRect(0, 0, width, height, glow)
 
 
-# ==================== Dashboard Tab (v3.8.1 Organic) ====================
+# ==================== Dashboard Tab (v6.0.2 SSOT Pure Reader) ====================
 class DashboardTab(QWidget):
-    """
-    v3.8.1 Organic Visualization Dashboard
-    """
-    
-    # v3.4.5: ヘッダースタイル定義（QWidget用 - Ghost Border完全抹殺）
+    """v6.0.2 SSOT Pure Reader Dashboard - No local BioEngine"""
     HEADER_STYLE_BASE = """
         QFrame#statusFrame {{
             background-color: #1A1A1A;
@@ -946,66 +794,35 @@ class DashboardTab(QWidget):
             padding: 0px;
         }}
     """
-    
-    # v3.4.6: Recovery Modeの色
-    COLOR_RECOVERY = '#27C93F'  # Green
-    
+    COLOR_RECOVERY = '#27C93F'
     def __init__(self):
         super().__init__()
-        
-        # BioEngine初期化（db_pathを渡してHydration有効化）
-        db_path = ROOT_PATH / "Data"
-        self.bio_engine = BioEngine(readiness=75, db_path=db_path) if ENGINE_AVAILABLE else BioEngine()
-        
-        # v3.9.1: Database初期化（Shadow HR永続化用）
-        try:
-            from core.database import LifeOSDatabase
-            self.database = LifeOSDatabase(str(ROOT_PATH / "Data" / "life_os.db"))
-        except Exception as e:
-            print(f"v3.9.1 DashboardTab: Database init failed: {e}")
-            self.database = None
-        
-        # v3.9: 起動時にDBから最新のHRデータを読み込み、Shadow HRを初期化
-        self._initialize_shadow_hr_from_db()
-        
         try:
             pygame.mixer.init()
         except:
             pass
-        
-        # v4.1.2: NeuroSoundEngine + Controller初期化
         self.neuro_sound: Optional[NeuroSoundEngine] = None
         self.neuro_controller: Optional[NeuroSoundController] = None
         if AUDIO_ENGINE_AVAILABLE and NeuroSoundEngine:
             try:
                 print("=" * 50)
                 print("[Audio Engine] Initializing...")
-                
-                # v4.2.1: NeuroSoundEngineは内部でsounds/を付与するためDataパスを渡す
                 data_path = ROOT_PATH / "Data"
                 audio_config = config.get('audio', {})
                 openai_config = config.get('openai', {})
                 print(f"[Audio Engine] Data path: {data_path}")
-                print(f"[Audio Engine] Config: enabled={audio_config.get('enabled', True)}, "
-                      f"bgm_vol={audio_config.get('bgm_volume', 0.08)}")
+                print(f"[Audio Engine] Config: enabled={audio_config.get('enabled', True)}, bgm_vol={audio_config.get('bgm_volume', 0.08)}")
                 print(f"[NLC] Config loaded. API Key present: {'Yes' if openai_config.get('api_key') else 'No'}")
                 self.neuro_sound = NeuroSoundEngine(data_path, config)
-                
-                # v4.2.1: 音声エンジン初期化（クリーンアップ + アセット生成）
                 print("[Audio Engine] Calling initialize()...")
                 self.neuro_sound.initialize()
-                
-                # NeuroSoundController - State Inertia（30秒）付き
                 if NeuroSoundController:
                     self.neuro_controller = NeuroSoundController(self.neuro_sound)
                     print("[Audio Engine] NeuroSoundController attached")
                 else:
                     print("[Audio Engine] NeuroSoundController not available (standalone mode)")
-                
                 print(f"[Audio Engine] SUCCESS - initialized at {data_path}/sounds")
-                print(f"[Audio Engine] BGM={audio_config.get('bgm_volume', 0.08)*100:.0f}%, "
-                      f"NLC=Bio-Adaptive, "
-                      f"Inertia={audio_config.get('state_inertia_seconds', 30)}s")
+                print(f"[Audio Engine] BGM={audio_config.get('bgm_volume', 0.08)*100:.0f}%, NLC=Bio-Adaptive, Inertia={audio_config.get('state_inertia_seconds', 30)}s")
                 print("=" * 50)
             except Exception as e:
                 print(f"!!! AUDIO ENGINE INIT FAILED: {e}")
@@ -1013,33 +830,14 @@ class DashboardTab(QWidget):
                 self.neuro_sound = None
                 self.neuro_controller = None
         else:
-            print(f"[Audio Engine] SKIPPED - AUDIO_ENGINE_AVAILABLE={AUDIO_ENGINE_AVAILABLE}, "
-                  f"NeuroSoundEngine={NeuroSoundEngine is not None}")
-        
-        # v3.4.6: 状態キャッシュ（Dual Timer間で共有）
+            print(f"[Audio Engine] SKIPPED - AUDIO_ENGINE_AVAILABLE={AUDIO_ENGINE_AVAILABLE}, NeuroSoundEngine={NeuroSoundEngine is not None}")
         self._cached_state = {}
         self._cached_details = {}
         self._cached_brain_state = {}
-        self._cached_metrics = {}
         self._cached_effective_apm = 0
-        
-        # v3.4.6: 表示値の平滑化用
         self._smoothed_mouse_speed = 0.0
-        self._mouse_speed_alpha = 0.15  # 強めの平滑化
-        
-        # v3.9.1: Shadow HR保存用（60秒ごとにDB保存）
-        self._last_shadow_hr_save: Optional[datetime] = None
-        self._shadow_hr_save_interval = 60  # 秒
-        
-        # v4.2.1: Shadow HR Kinetics Solver
-        # 自律神経応答を模倣した非対称時定数モデル
-        initial_hr = getattr(self.bio_engine, 'baseline_hr', 65) or 65
-        self._shadow_kinetics = ShadowKineticsSolver(initial_bpm=initial_hr)
-        
+        self._mouse_speed_alpha = 0.15
         self.initUI()
-        
-        # v3.4.6: Dual Timer
-        # Fast Timer (100ms) - テレメトリ表示のみ
         self.fast_timer = QTimer(self)
         self.fast_timer.timeout.connect(self.update_fast)
         self.fast_timer.start(100)
@@ -1146,67 +944,6 @@ class DashboardTab(QWidget):
         main_layout.addWidget(self.telemetry)
         self.setLayout(main_layout)
     
-    def _initialize_shadow_hr_from_db(self):
-        """
-        v3.9: 起動時にDBから最新のHRデータを読み込み、Shadow HRを初期化
-        
-        これにより起動直後からhr_last_updateが設定され、
-        データが古い場合はShadow HRが機能する
-        """
-        try:
-            db_path = ROOT_PATH / "Data" / "life_os.db"
-            if not db_path.exists():
-                print("v3.9 Shadow HR Init: No DB file, starting fresh")
-                return
-            
-            import sqlite3
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            # 直近24時間の最新HRデータを取得
-            now = now_jst()
-            start_time = now - timedelta(hours=24)
-            
-            cursor.execute('''
-                SELECT timestamp, bpm, source
-                FROM heartrate_logs
-                WHERE timestamp >= ?
-                ORDER BY timestamp DESC
-                LIMIT 1
-            ''', (start_time.isoformat(),))
-            
-            row = cursor.fetchone()
-            conn.close()
-            
-            if row:
-                try:
-                    ts = datetime.fromisoformat(row['timestamp'])
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=JST)
-                    
-                    bpm = row['bpm']
-                    
-                    # BioEngineの状態を更新
-                    self.bio_engine.current_hr = bpm
-                    self.bio_engine.hr_last_update = ts
-                    
-                    # 5分以上古い場合はestimatedとしてマーク
-                    hr_age_seconds = (now - ts).total_seconds()
-                    if hr_age_seconds >= 300:
-                        self.bio_engine.is_hr_estimated = True
-                    else:
-                        self.bio_engine.is_hr_estimated = False
-                        self.bio_engine.estimated_hr = bpm
-                    
-                    print(f"v3.9 Shadow HR Init: Loaded HR from DB (bpm={bpm}, age={hr_age_seconds/60:.1f}min, estimated={self.bio_engine.is_hr_estimated})")
-                except Exception as e:
-                    print(f"v3.9 Shadow HR Init: Parse error: {e}")
-            else:
-                print("v3.9 Shadow HR Init: No recent HR data in DB")
-                
-        except Exception as e:
-            print(f"v3.9 Shadow HR Init Error: {e}")
     def _get_sleep_from_db(self) -> Optional[int]:
         try:
             db_path = ROOT_PATH / "Data" / "life_os.db"
@@ -1219,303 +956,40 @@ class DashboardTab(QWidget):
             return row[0] if row and row[0] else None
         except:
             return None
-    def _save_shadow_hr_to_db(self, predicted_hr: int, timestamp: datetime):
-        """
-        v3.9: Shadow HR予測値をDBに保存
-        
-        60秒ごとに予測値をheartrate_logsテーブルに保存し、
-        グラフに自然な曲線として表示させる。
-        """
-        try:
-            # 保存間隔チェック（60秒ごと）
-            if self._last_shadow_hr_save is not None:
-                elapsed = (timestamp - self._last_shadow_hr_save).total_seconds()
-                if elapsed < self._shadow_hr_save_interval:
-                    return
-            
-            db_path = ROOT_PATH / "Data" / "life_os.db"
-            if not db_path.exists():
-                return
-            
-            import sqlite3
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-            
-            # heartrate_logsに予測値を保存（source='shadow'）
-            cursor.execute('''
-                INSERT OR REPLACE INTO heartrate_logs (timestamp, bpm, source)
-                VALUES (?, ?, ?)
-            ''', (timestamp.isoformat(), predicted_hr, 'shadow'))
-            
-            conn.commit()
-            conn.close()
-            
-            self._last_shadow_hr_save = timestamp
-            
-            # daemon_state.jsonのhr_streamにも追加
-            state = safe_read_json(STATE_PATH, {})
-            details = state.get('oura_details', {})
-            hr_stream = details.get('hr_stream', [])
-            
-            # 新しい予測エントリを追加
-            hr_stream.append({
-                'timestamp': timestamp.isoformat(),
-                'bpm': predicted_hr,
-                'source': 'shadow'
-            })
-            
-            # 24時間以上古いエントリを削除
-            cutoff = timestamp - timedelta(hours=24)
-            hr_stream = [
-                e for e in hr_stream 
-                if datetime.fromisoformat(e['timestamp']).replace(tzinfo=JST) > cutoff
-            ]
-            
-            details['hr_stream'] = hr_stream
-            state['oura_details'] = details
-            safe_write_json(STATE_PATH, state)
-            
-        except Exception as e:
-            pass  # サイレントに失敗
-    
     def update_fast(self):
-        """
-        v3.4.6: 高速更新 (100ms)
-        入力に即応すべきテレメトリ表示のみ更新
-        """
+        """v6.2.7 SSOT: 高速更新 (100ms) - brain_stateのキャッシュから読み取り"""
         try:
-            # Live APM（ローカル計算）
-            live_intensity = input_listener.get_intensity() if PYNPUT_AVAILABLE else 0
-            live_apm = int(live_intensity * 200)
-            effective_apm = max(self._cached_brain_state.get('apm', 0), live_apm)
-            self._cached_effective_apm = effective_apm
-            
-            # v3.4.6: Mouse Speed平滑化（表示値）
-            raw_speed = self._cached_metrics.get('current_mouse_speed', 0)
-            self._smoothed_mouse_speed = (
-                self._mouse_speed_alpha * raw_speed +
-                (1 - self._mouse_speed_alpha) * self._smoothed_mouse_speed
-            )
-            
-            # 直近修正率
-            recent_corr = self._cached_metrics.get('recent_correction_rate', 0)
+            apm = self._cached_brain_state.get('apm', 0) or 0
+            mouse_pixels = self._cached_brain_state.get('mouse_pixels', 0) or 0
+            recent_corr = self._cached_brain_state.get('recent_correction_rate', 0) or 0
             corr_pct = int(recent_corr * 100)
-            
-            # 負荷
-            load = self._cached_metrics.get('current_load', 0)
+            load = self._cached_brain_state.get('current_load', 0) or 0
             load_pct = int(load * 100)
-            
-            # CORR色判定
-            if corr_pct < 5:
-                corr_color = Colors.TEXT_SECONDARY
-            elif corr_pct <= 15:
-                corr_color = Colors.ORANGE
-            else:
-                corr_color = Colors.RED
-            
-            # LOAD色判定
-            if load_pct < 80:
-                load_color = Colors.TEXT_SECONDARY
-            else:
-                load_color = Colors.RED
-            
-            # サブテキスト更新（高頻度）
-            self.status_sub.setText(
-                f"APM: {effective_apm} | MOUSE: {int(self._smoothed_mouse_speed)}px/s | "
-                f"CORR: <font color='{corr_color}'>{corr_pct}%</font> | "
-                f"LOAD: <font color='{load_color}'>{load_pct}%</font>"
-            )
-            
+            corr_color = Colors.TEXT_SECONDARY if corr_pct < 5 else (Colors.ORANGE if corr_pct <= 15 else Colors.RED)
+            load_color = Colors.TEXT_SECONDARY if load_pct < 80 else Colors.RED
+            self.status_sub.setText(f"APM: {apm} | MOUSE: {int(mouse_pixels)}px | CORR: <font color='{corr_color}'>{corr_pct}%</font> | LOAD: <font color='{load_color}'>{load_pct}%</font>")
         except Exception as e:
-            pass  # 高速更新は静かに失敗
+            pass
     
     def update_slow(self):
+        """v6.1.0 Hybrid Mode: DB優先 + JSONフォールバック"""
         if self._is_minimized: return
         try:
-            state = safe_read_json(STATE_PATH, {})
+            state = get_state_from_db()
             details = state.get('oura_details', {})
             brain_state = state.get('brain_state', {})
-            
-            # キャッシュ更新
             self._cached_state = state
             self._cached_details = details
             self._cached_brain_state = brain_state
-            
-            readiness = state.get('last_oura_score', 75)
-            
-            # 累計値を取得
-            cumulative_mouse = brain_state.get('mouse_pixels_cumulative', 0) or 0
-            cumulative_backspace = brain_state.get('backspace_count_cumulative', 0) or 0
-            cumulative_keys = brain_state.get('key_count_cumulative', 0) or 0
-            cumulative_scroll = brain_state.get('scroll_steps_cumulative', 0) or 0
-            phantom_recovery_sum = brain_state.get('phantom_recovery_sum', 0) or 0
-            phantom_recovery_accumulated = brain_state.get('phantom_recovery', 0) or 0
-            
-            # v3.5: シーシャセッション状態を確認
+            readiness = state.get('last_oura_score', 75) or 75
             is_shisha_active = state.get('is_shisha_active', False)
-            
-            # BioEngine設定
-            self.bio_engine.set_readiness(readiness)
-            
-            sleep_score = details.get('sleep_score', 75)
-            if sleep_score:
-                self.bio_engine.set_sleep_score(sleep_score)
-            
-            wake_anchor_iso = details.get('wake_anchor_iso')
-            if wake_anchor_iso:
-                try:
-                    wake_time = datetime.fromisoformat(wake_anchor_iso)
-                    if wake_time.tzinfo is None:
-                        wake_time = wake_time.replace(tzinfo=JST)
-                    self.bio_engine.set_wake_time(wake_time)
-                except:
-                    pass
-            
-            rhr = details.get('true_rhr')
-            if rhr:
-                self.bio_engine.set_baseline_hr(rhr)
-            
-            # v3.5.1: hr_streamを取得（遡及補正用）
-            hr_stream = details.get('hr_stream', [])
-            
-            # v3.9: Shadow HR - 実測HRが古い場合は予測値を使用
-            now = now_jst()
-            actual_hr = details.get('current_hr')
-            effective_hr = actual_hr  # デフォルトは実測値
-            is_hr_estimated = False
-            
-            if hr_stream:
-                try:
-                    last_entry = hr_stream[-1]
-                    last_ts = datetime.fromisoformat(last_entry['timestamp'])
-                    if last_ts.tzinfo is None:
-                        last_ts = last_ts.replace(tzinfo=JST)
-                    
-                    last_source = last_entry.get('source', 'unknown')
-                    last_bpm = last_entry.get('bpm')
-                    
-                    # v3.9: shadowエントリの場合は実測データを探す
-                    if last_source == 'shadow':
-                        # shadowエントリは予測値なので、最新の実測値を探す
-                        actual_entries = [e for e in hr_stream if e.get('source') != 'shadow']
-                        if actual_entries:
-                            actual_last = actual_entries[-1]
-                            actual_ts = datetime.fromisoformat(actual_last['timestamp'])
-                            if actual_ts.tzinfo is None:
-                                actual_ts = actual_ts.replace(tzinfo=JST)
-                            self.bio_engine.hr_last_update = actual_ts
-                        
-                        is_hr_estimated = True
-                        # 新しい予測値を計算
-                        mouse_speed = brain_state.get('mouse_speed', 0) or 0
-                        work_hours = self.bio_engine.continuous_work_hours
-                        
-                        raw_predicted_hr = self.bio_engine.shadow_hr.predict(
-                            base_hr=self.bio_engine.baseline_hr,
-                            apm=self._cached_effective_apm,
-                            mouse_speed=mouse_speed,
-                            work_hours=work_hours
-                        )
-                        
-                        # v4.2.1: Kinetics Solver適用（生理的追従）
-                        self._shadow_kinetics.set_target(raw_predicted_hr)
-                        predicted_hr = int(round(self._shadow_kinetics.update(dt=None)))
-                        
-                        effective_hr = predicted_hr
-                        self.bio_engine.is_hr_estimated = True
-                        self.bio_engine.estimated_hr = predicted_hr
-                        
-                        # v3.9: 予測HRをDBに定期保存（60秒ごと）
-                        self._save_shadow_hr_to_db(predicted_hr, now)
-                    else:
-                        # 実測エントリの場合
-                        hr_age_seconds = (now - last_ts).total_seconds()
-                        
-                        if hr_age_seconds >= 300:  # 5分以上古い
-                            is_hr_estimated = True
-                            # Shadow HR予測
-                            mouse_speed = brain_state.get('mouse_speed', 0) or 0
-                            work_hours = self.bio_engine.continuous_work_hours
-                            
-                            raw_predicted_hr = self.bio_engine.shadow_hr.predict(
-                                base_hr=self.bio_engine.baseline_hr,
-                                apm=self._cached_effective_apm,
-                                mouse_speed=mouse_speed,
-                                work_hours=work_hours
-                            )
-                            
-                            # v4.2.1: Kinetics Solver適用（生理的追従）
-                            self._shadow_kinetics.set_target(raw_predicted_hr)
-                            predicted_hr = int(round(self._shadow_kinetics.update(dt=None)))
-                            
-                            effective_hr = predicted_hr
-                            
-                            # BioEngineの状態を更新
-                            self.bio_engine.hr_last_update = last_ts
-                            self.bio_engine.is_hr_estimated = True
-                            self.bio_engine.estimated_hr = predicted_hr
-                            
-                            # v3.9: 予測HRをDBに定期保存（60秒ごと）
-                            self._save_shadow_hr_to_db(predicted_hr, now)
-                        else:
-                            # v4.2.1: 実測値取得時はKineticsをリセット
-                            actual_bpm = last_bpm or actual_hr
-                            self._shadow_kinetics.reset(actual_bpm)
-                            
-                            self.bio_engine.hr_last_update = last_ts
-                            self.bio_engine.is_hr_estimated = False
-                            self.bio_engine.estimated_hr = actual_bpm
-                            effective_hr = actual_bpm
-                except Exception as e:
-                    pass
-            else:
-                # hr_streamがない場合もShadow HRを計算
-                is_hr_estimated = True
-                mouse_speed = brain_state.get('mouse_speed', 0) or 0
-                work_hours = self.bio_engine.continuous_work_hours
-                
-                raw_predicted_hr = self.bio_engine.shadow_hr.predict(
-                    base_hr=self.bio_engine.baseline_hr,
-                    apm=self._cached_effective_apm,
-                    mouse_speed=mouse_speed,
-                    work_hours=work_hours
-                )
-                
-                # v4.2.1: Kinetics Solver適用（生理的追従）
-                self._shadow_kinetics.set_target(raw_predicted_hr)
-                predicted_hr = int(round(self._shadow_kinetics.update(dt=None)))
-                
-                effective_hr = predicted_hr
-                self.bio_engine.is_hr_estimated = True
-                self.bio_engine.estimated_hr = predicted_hr
-            
-            # v3.5.2: total_nap_minutesを取得（Nap回復用）
+            phantom_recovery_accumulated = brain_state.get('phantom_recovery', 0) or 0
             total_nap_minutes = details.get('total_nap_minutes', 0.0) or 0.0
-            
-            # v3.6: BioEngine.update（Physiological Integrity対応）
-            # v3.9: effective_hr（実測or予測）とis_hr_estimatedフラグを渡す
-            self.bio_engine.update(
-                apm=self._cached_effective_apm,
-                cumulative_mouse_pixels=cumulative_mouse,
-                cumulative_backspace_count=cumulative_backspace,
-                cumulative_key_count=cumulative_keys,
-                cumulative_scroll_steps=cumulative_scroll,
-                phantom_recovery_sum=phantom_recovery_sum,
-                hr=effective_hr,
-                hr_stream=hr_stream,
-                total_nap_minutes=total_nap_minutes,
-                dt_seconds=1.0,
-                is_shisha_active=is_shisha_active,
-                is_hr_estimated=is_hr_estimated
-            )
-            
-            metrics = self.bio_engine.get_health_metrics()
-            self._cached_metrics = metrics
-            fp = metrics.get('effective_fp', 100)
-            load = metrics.get('current_load', 0)
+            fp = brain_state.get('effective_fp', 75.0) or 75.0
+            load = brain_state.get('current_load', 0.0) or 0.0
+            estimated_readiness = brain_state.get('estimated_readiness', readiness) or readiness
+            activity_state = brain_state.get('activity_state', 'IDLE')
             idle_seconds = state.get('idle_seconds', 0)
-            estimated_readiness = metrics.get('estimated_readiness', readiness)
-            activity_state = metrics.get('activity_state', 'ACTIVE')
             target_interval = 5000 if idle_seconds > 60 else 1000
             if self._current_slow_interval != target_interval:
                 self._current_slow_interval = target_interval
@@ -1528,99 +1002,80 @@ class DashboardTab(QWidget):
                 audio_state = 'SHISHA' if is_shisha_active else activity_state
                 self.neuro_sound.set_mode(audio_state)
                 self.neuro_sound.update_bio_context(audio_state, load)
-            
-            # v3.4.6: Recovery Mode判定
-            is_recovery_mode = (
-                activity_state == 'IDLE' and 
-                phantom_recovery_accumulated > 0
-            )
-            
-            # Status
-            op_code, op_sub = self.bio_engine.get_status_code()
-            
-            # v3.5: シーシャ中は専用色（紫）
-            if is_shisha_active or 'SHISHA' in op_code:
+            is_recovery_mode = activity_state == 'IDLE' and phantom_recovery_accumulated > 0
+            op_code = brain_state.get('status_code', 'INITIALIZING')
+            state_label = brain_state.get('state_label', 'IDLE')
+            if is_shisha_active or 'SHISHA' in str(op_code):
                 status_color = Colors.PURPLE
+                display_status = 'SHISHA ACTIVE'
             elif is_recovery_mode:
-                op_code = "RECOVERY ACTIVE"
+                display_status = "RECOVERY ACTIVE"
                 status_color = self.COLOR_RECOVERY
-            elif 'CRITICAL' in op_code or 'DEPLETED' in op_code:
+            elif 'CRITICAL' in str(op_code) or 'DEPLETED' in str(op_code):
                 status_color = Colors.RED
-            elif 'WARNING' in op_code or 'CAUTION' in op_code or 'EXTENDED' in op_code or 'HYDRATION' in op_code:
+                display_status = f"{op_code} [{state_label}]"
+            elif 'WARNING' in str(op_code) or 'CAUTION' in str(op_code) or 'EXTENDED' in str(op_code) or 'HYDRATION' in str(op_code):
                 status_color = Colors.ORANGE
+                display_status = f"{op_code} [{state_label}]"
             else:
                 status_color = Colors.CYAN
-            
-            self.status_label.setText(op_code)
+                display_status = f"{op_code} [{state_label}]" if op_code and state_label else (op_code or 'INITIALIZING')
+            self.status_label.setText(display_status)
             self.status_frame.setStyleSheet(self.HEADER_STYLE_BASE.format(color=status_color))
             self.status_label.setStyleSheet(f"color: {status_color}; letter-spacing: 2px; border: none; background: transparent;")
-            
-            # Trinity Circle（1秒に1回）
             self.trinity_circle.set_data(int(estimated_readiness), fp, load)
-            
-            # Info Row
             now = now_jst()
-            
-            recommended_break = self.bio_engine.get_recommended_break_time()
-            remaining_to_break = (recommended_break - now).total_seconds()
-            self.info_widgets['next_break'].setText(recommended_break.strftime('%H:%M'))
-            if remaining_to_break < 1800:
-                self.info_widgets['next_break'].setStyleSheet(f"color: {Colors.RED};")
-            elif remaining_to_break < 3600:
-                self.info_widgets['next_break'].setStyleSheet(f"color: {Colors.ORANGE};")
+            recommended_break_iso = brain_state.get('recommended_break_iso')
+            if recommended_break_iso:
+                try:
+                    recommended_break = datetime.fromisoformat(recommended_break_iso)
+                    if recommended_break.tzinfo is None:
+                        recommended_break = recommended_break.replace(tzinfo=JST)
+                    remaining_to_break = (recommended_break - now).total_seconds()
+                    self.info_widgets['next_break'].setText(recommended_break.strftime('%H:%M'))
+                    self.info_widgets['next_break'].setStyleSheet(f"color: {Colors.RED if remaining_to_break < 1800 else (Colors.ORANGE if remaining_to_break < 3600 else Colors.CYAN)};")
+                except:
+                    self.info_widgets['next_break'].setText('--:--')
+                    self.info_widgets['next_break'].setStyleSheet(f"color: {Colors.TEXT_DIM};")
             else:
-                self.info_widgets['next_break'].setStyleSheet(f"color: {Colors.CYAN};")
-            
-            exhaustion_time = self.bio_engine.get_exhaustion_time()
-            remaining_to_exhaustion = (exhaustion_time - now).total_seconds()
-            self.info_widgets['bedtime'].setText(exhaustion_time.strftime('%H:%M'))
-            if remaining_to_exhaustion < 3600:
-                self.info_widgets['bedtime'].setStyleSheet(f"color: {Colors.RED};")
-            elif remaining_to_exhaustion < 2 * 3600:
-                self.info_widgets['bedtime'].setStyleSheet(f"color: {Colors.ORANGE};")
+                self.info_widgets['next_break'].setText('--:--')
+                self.info_widgets['next_break'].setStyleSheet(f"color: {Colors.TEXT_DIM};")
+            exhaustion_iso = brain_state.get('exhaustion_iso')
+            if exhaustion_iso:
+                try:
+                    exhaustion_time = datetime.fromisoformat(exhaustion_iso)
+                    if exhaustion_time.tzinfo is None:
+                        exhaustion_time = exhaustion_time.replace(tzinfo=JST)
+                    remaining_to_exhaustion = (exhaustion_time - now).total_seconds()
+                    self.info_widgets['bedtime'].setText(exhaustion_time.strftime('%H:%M'))
+                    self.info_widgets['bedtime'].setStyleSheet(f"color: {Colors.RED if remaining_to_exhaustion < 3600 else (Colors.ORANGE if remaining_to_exhaustion < 7200 else Colors.CYAN)};")
+                except:
+                    self.info_widgets['bedtime'].setText('--:--')
+                    self.info_widgets['bedtime'].setStyleSheet(f"color: {Colors.TEXT_DIM};")
             else:
-                self.info_widgets['bedtime'].setStyleSheet(f"color: {Colors.CYAN};")
+                self.info_widgets['bedtime'].setText('--:--')
+                self.info_widgets['bedtime'].setStyleSheet(f"color: {Colors.TEXT_DIM};")
             oura_recovery = details.get('recovery_score', 0) or 0
-            phantom_sum = metrics.get('phantom_recovery_sum', 0) or 0
-            nap_recovery = total_nap_minutes * 0.5
-            ceiling = metrics.get('recovery_ceiling', 100)
-            current_fp = metrics.get('effective_fp', 100)
-            total_potential = oura_recovery + phantom_sum + nap_recovery
-            effective_recovery = max(0, min(total_potential, ceiling - current_fp))
-            recovery_eff = metrics.get('recovery_efficiency', 1.0)
+            phantom_sum = brain_state.get('phantom_recovery_sum', 0) or 0
+            ceiling = brain_state.get('recovery_ceiling', 100) or 100
+            total_potential = oura_recovery + phantom_sum
+            effective_recovery = max(0, min(total_potential, ceiling - fp))
+            recovery_eff = brain_state.get('recovery_efficiency', 1.0) or 1.0
             self.info_widgets['recovery'].setText(f"+{effective_recovery:.1f}")
             recovery_color = self.COLOR_RECOVERY if recovery_eff >= 1.0 else (Colors.RED if recovery_eff < 0.5 else Colors.ORANGE)
             self.info_widgets['recovery'].setStyleSheet(f"color: {recovery_color};")
-            avg_sleep = get_average_sleep_from_db()
             main_sleep = self._get_sleep_from_db() or details.get('main_sleep_seconds') or 0
-            self.bio_engine.set_main_sleep_seconds(main_sleep)
             if main_sleep < 1800:
-                main_sleep = int(total_nap_minutes * 60)
-                total_sleep_seconds = main_sleep
-            else:
-                total_sleep_seconds = main_sleep + int(total_nap_minutes * 60)
-            if avg_sleep:
-                debt = IDEAL_SLEEP_SECONDS - (avg_sleep + int(total_nap_minutes * 60))
-            elif total_sleep_seconds > 0:
-                debt = IDEAL_SLEEP_SECONDS - total_sleep_seconds
-            else:
-                debt = None
+                main_sleep = details.get('max_continuous_rest_seconds') or 0
+            debt = (IDEAL_SLEEP_SECONDS - main_sleep) if main_sleep > 0 else None
             debt_text, debt_color = format_sleep_debt(debt)
             self.info_widgets['sleep'].setText(debt_text)
             self.info_widgets['sleep'].setStyleSheet(f"color: {debt_color};")
-            
-            # Resource Curve（1秒に1回）
-            prediction = self.bio_engine.predict_trajectory(240)
-            self.resource_curve.set_data(prediction)
-            
-            # Cards
-            # v3.8.2: 参照キー修正 skin_temperature_deviation → temperature_deviation
+            prediction = brain_state.get('prediction', {'continue': [], 'rest': []})
+            if prediction and (prediction.get('continue') or prediction.get('rest')):
+                self.resource_curve.set_data(prediction)
             temp = details.get('temperature_deviation')
-            if temp is not None:
-                self.card_widgets['temp'].set_data(f"{temp:+.2f}°C", "", Colors.BLUE)
-            else:
-                self.card_widgets['temp'].set_data("--", "", Colors.TEXT_DIM)
-            
+            self.card_widgets['temp'].set_data(f"{temp:+.2f}°C" if temp is not None else "--", "", Colors.BLUE if temp is not None else Colors.TEXT_DIM)
             hr = details.get('current_hr')
             hr_stream = details.get('hr_stream', [])
             hr_time = ""
@@ -1630,59 +1085,19 @@ class DashboardTab(QWidget):
                     hr_time = f"({ts.strftime('%H:%M')})"
                 except:
                     pass
-            
-            # v3.9: Shadow Heartrate対応
-            is_hr_estimated = metrics.get('is_hr_estimated', False)
-            estimated_hr = metrics.get('estimated_hr')
-            
+            is_hr_estimated = brain_state.get('is_hr_estimated', False)
+            estimated_hr = brain_state.get('estimated_hr')
             if is_hr_estimated and estimated_hr is not None:
-                # v4.1.2: HRゆらぎ追加（生物学的妥当性向上）
-                # true_rhrを取得してゆらぎ下限を設定
-                true_rhr = details.get('true_rhr') if details else None
+                true_rhr = details.get('true_rhr')
                 jitter = random.randint(-2, 3)
                 display_hr = estimated_hr + jitter
-                
-                # v4.1.2: RHRより5以上は常に高くする（覚醒時はRHRまで下がらない）
                 if true_rhr:
                     display_hr = max(true_rhr + 5, display_hr)
-                
-                # 予測値の場合はグレー表示 + (EST)
-                self.card_widgets['heart'].set_data(
-                    f"~{display_hr} bpm", 
-                    "(EST)", 
-                    Colors.TEXT_DIM
-                )
+                self.card_widgets['heart'].set_data(f"~{display_hr} bpm", "(EST)", Colors.TEXT_DIM)
             elif hr:
                 self.card_widgets['heart'].set_data(f"{hr} bpm", hr_time, Colors.TEXT_PRIMARY)
             else:
                 self.card_widgets['heart'].set_data("-- bpm", "", Colors.TEXT_DIM)
-            
-            # v3.9: Shadow HR学習トリガー処理
-            try:
-                pending_training = state.get('pending_shadow_training', [])
-                if pending_training:
-                    for entry in pending_training:
-                        ts_str = entry.get('timestamp')
-                        bpm = entry.get('bpm')
-                        if ts_str and bpm:
-                            try:
-                                ts = datetime.fromisoformat(ts_str)
-                                if ts.tzinfo is None:
-                                    ts = ts.replace(tzinfo=JST)
-                                self.bio_engine.train_shadow_model(
-                                    actual_hr=bpm,
-                                    timestamp=ts,
-                                    hr_stream=hr_stream
-                                )
-                            except Exception:
-                                pass
-                    
-                    # 処理済みデータをクリア
-                    state['pending_shadow_training'] = []
-                    safe_write_json(STATE_PATH, state)
-            except Exception:
-                pass
-            
             rhr = details.get('true_rhr')
             rhr_time = ""
             rest_times = [e for e in hr_stream if e.get('source') == 'rest']
@@ -1692,68 +1107,23 @@ class DashboardTab(QWidget):
                     rhr_time = f"({ts.strftime('%H:%M')})"
                 except:
                     pass
-            if rhr:
-                # v3.4.6: ハイライト解除（True→False）
-                self.card_widgets['rhr'].set_data(f"{rhr} bpm", rhr_time, Colors.CYAN, False)
-            else:
-                self.card_widgets['rhr'].set_data("-- bpm", "", Colors.TEXT_DIM)
-            
-            stress_index = metrics.get('stress_index', 0)
+            self.card_widgets['rhr'].set_data(f"{rhr} bpm" if rhr else "-- bpm", rhr_time if rhr else "", Colors.CYAN if rhr else Colors.TEXT_DIM, False)
+            stress_index = brain_state.get('stress_index', 0) or 0
             stress_color = Colors.RED if stress_index >= 80 else (Colors.ORANGE if stress_index >= 50 else Colors.CYAN)
             self.card_widgets['stress'].set_data(f"STR: {int(stress_index)}", "", stress_color)
             self.mute_btn.setText("🔊 Unmute" if state.get('is_muted') else "🔇 Mute")
-            
-            # v3.8: effective_fpをstate.jsonのbrain_stateに追加（daemon用）
-            try:
-                state = safe_read_json(STATE_PATH, {})
-                brain_state = state.get('brain_state', {})
-                brain_state['effective_fp'] = fp
-                state['brain_state'] = brain_state
-                safe_write_json(STATE_PATH, state)
-            except Exception:
-                pass
-            
-            # v3.9.1: Shadow HR永続化（60秒間隔でDBに保存）
-            # 予測値が有効な場合のみ保存（後から実測データで上書き可能）
-            try:
-                if is_hr_estimated and estimated_hr is not None and self.database:
-                    now = now_jst()
-                    should_save = (
-                        self._last_shadow_hr_save is None or
-                        (now - self._last_shadow_hr_save).total_seconds() >= self._shadow_hr_save_interval
-                    )
-                    
-                    if should_save:
-                        shadow_entry = [{
-                            'timestamp': now.isoformat(),
-                            'bpm': estimated_hr,
-                            'source': 'shadow'
-                        }]
-                        saved = self.database.log_heartrate_stream(shadow_entry)
-                        if saved > 0:
-                            self._last_shadow_hr_save = now
-                            print(f"v3.9.1 Shadow HR Persisted: {estimated_hr} bpm")
-            except Exception as shadow_err:
-                print(f"v3.9.1 Shadow HR save error: {shadow_err}")
-            
         except Exception as e:
             print(f"Dashboard slow update error: {e}")
     
     def _toggle_mute(self):
-        """
-        v4.1.2: Mute連動 - BGM/Voiceを一括で消音
-        
-        シーシャ音声は別系統のため影響させない
-        """
-        state = safe_read_json(STATE_PATH, {})
+        """v6.1.0: Mute連動（DB経由）"""
+        db = get_gui_db()
+        if not db: return
+        state = db.get_daemon_state()
         is_muted = not state.get('is_muted', False)
-        state['is_muted'] = is_muted
-        safe_write_json(STATE_PATH, state)
-        
-        # v4.1.2: NeuroSoundEngineの有効/無効を切り替え
+        db.update_daemon_state(is_muted=is_muted)
         if self.neuro_sound:
             self.neuro_sound.set_enabled(not is_muted)
-            print(f"[DashboardTab] Audio {'muted' if is_muted else 'unmuted'}")
 
 
 # ==================== Sequence Tab (Shisha Timer) ====================
@@ -1808,19 +1178,15 @@ class SequenceTab(QWidget):
             print(f"v3.7 Shisha Recovery: Could not handle incomplete session ({e})")
     
     def _force_reset_shisha_state(self):
-        """
-        v3.5.1: 起動時にis_shisha_activeを強制的にFalseにリセット
-        前回のクラッシュや異常終了で残ったゾンビ状態を解消
-        """
+        """v6.1.0: 起動時にis_shisha_activeを強制的にFalseにリセット（DB経由）"""
         try:
-            state = safe_read_json(STATE_PATH, {})
-            if state.get('is_shisha_active', False):
-                state['is_shisha_active'] = False
-                safe_write_json(STATE_PATH, state)
-                print("v3.5.1 Shisha Zombie Fix: Reset is_shisha_active to False")
-        except Exception as e:
-            # ファイル読み書きエラーでも落ちないようにする
-            print(f"v3.5.1 Shisha Zombie Fix: Could not reset state ({e})")
+            db = get_gui_db()
+            if db:
+                state = db.get_daemon_state()
+                if state.get('is_shisha_active', False):
+                    db.update_daemon_state(is_shisha_active=False, current_shisha_session_id=None)
+        except Exception:
+            pass
     
     def initUI(self):
         main_layout = QVBoxLayout()
@@ -1948,7 +1314,7 @@ class SequenceTab(QWidget):
             lbl = QLabel(f"{label}:")
             lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
             timing_layout.addWidget(lbl, row, col)
-            spin = QDoubleSpinBox()
+            spin = NoScrollDoubleSpinBox()
             spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
             spin.setRange(0.5, 120.0)
             spin.setDecimals(1)
@@ -2013,20 +1379,14 @@ class SequenceTab(QWidget):
             try:
                 self._current_session_id = self.database.start_shisha_session(self._session_start_time)
             except Exception as e:
-                print(f"v3.7 Shisha DB Error: Could not start session ({e})")
                 self._current_session_id = None
-        
-        state = safe_read_json(STATE_PATH, {})
-        state['is_shisha_active'] = True
-        state['audio_faded_out'] = True  # v4.0: フェードアウト状態を記録
-        safe_write_json(STATE_PATH, state)
-        
-        # v4.0: BGM/Ambientをフェードアウト
+        db = get_gui_db()
+        if db:
+            db.update_daemon_state(is_shisha_active=True, current_shisha_session_id=self._current_session_id)
         neuro_sound = self._get_neuro_sound_engine()
         if neuro_sound:
             neuro_sound.enter_shisha_mode()
-            print("[SequenceTab] Entered shisha mode - audio fading out")
-        
+            neuro_sound._shisha_faded_out = True
         self.timer.start(1000)
         self._update_display()
     
@@ -2050,21 +1410,13 @@ class SequenceTab(QWidget):
             try:
                 end_time = now_jst()
                 self.database.end_shisha_session(self._current_session_id, end_time, completed)
-            except Exception as e:
-                print(f"v3.7 Shisha DB Error: Could not end session ({e})")
-        
-        # セッション情報をクリア
+            except Exception:
+                pass
         self._current_session_id = None
         self._session_start_time = None
-        
-        # v4.2.2: シーシャ終了時は is_shisha_active のみ False に
-        # audio_faded_out は True のまま（PCに触るまでBGMは再開しない）
-        state = safe_read_json(STATE_PATH, {})
-        state['is_shisha_active'] = False
-        # state['audio_faded_out'] は True のまま維持
-        safe_write_json(STATE_PATH, state)
-        print("[SequenceTab] Shisha ended - waiting for user input to resume audio")
-        
+        db = get_gui_db()
+        if db:
+            db.update_daemon_state(is_shisha_active=False, current_shisha_session_id=None)
         self._update_display()
     
     def force_stop_for_shutdown(self):
@@ -2150,7 +1502,8 @@ class SequenceTab(QWidget):
             except: return 3.0
         def play():
             try:
-                state = safe_read_json(STATE_PATH, {})
+                db = get_gui_db()
+                state = db.get_daemon_state() if db else {}
                 if state.get('is_muted', False): return
                 neuro_sound = self._get_neuro_sound_engine()
                 sound_dir = ROOT_PATH / "Data" / "sounds" / "shisha"
@@ -2177,7 +1530,7 @@ class SequenceTab(QWidget):
         self.audio_thread.start()
     
     def _get_neuro_sound_engine(self):
-        """v4.1.2: NeuroSoundEngineへの参照を取得"""
+        """v6.0.1: NeuroSoundEngineへの参照を取得"""
         try:
             main_window = self.window()
             if main_window and hasattr(main_window, 'dashboard_tab'):
@@ -2191,7 +1544,7 @@ class SequenceTab(QWidget):
 
 class ShishaCircleWidget(QWidget):
     """
-    v3.4.2 シーシャ用円形プログレス
+    v6.0.1 シーシャ用円形プログレス
     ラベル位置を cy + size * 0.08 に設定
     """
     def __init__(self):
@@ -2247,7 +1600,7 @@ class ShishaCircleWidget(QWidget):
         text_rect = QRectF(0, cy - size * 0.08, width, size * 0.14)
         painter.drawText(text_rect, Qt.AlignCenter, time_text)
         
-        # v3.4.2: ラベルを cy + size * 0.08 に配置
+        # v6.0.1: ラベルを cy + size * 0.08 に配置
         painter.setPen(QColor(self.color if self.is_running else Colors.TEXT_DIM))
         painter.setFont(Fonts.label(int(size * 0.05)))
         label = "ACTIVE" if self.is_running else "STANDBY"
@@ -2258,7 +1611,7 @@ class ShishaCircleWidget(QWidget):
 
 # ==================== Analysis Tab ====================
 class TimelineGraphCanvas(QWidget):
-    """v5.4.0 Dual-Layer Architecture - Static Graph Layer (Bottom)"""
+    """v6.2.7 Dual-Layer Architecture - Static Graph Layer (Bottom)"""
     VIEW_WINDOW_HOURS = 12
     CACHE_HOURS = 72
     FP_MOVING_AVERAGE_WINDOW = 5
@@ -2286,23 +1639,34 @@ class TimelineGraphCanvas(QWidget):
         self.cached_shisha = []
         self.cached_sleep = {}
         self._cache_loaded = False
+        self._cached_sleep_spans = []
         self.estimated_hr = None
         self.is_hr_estimated = False
         self.scroll_offset_hours = 0.0
         self._buffer = None
         self._buffer_valid = False
         self._data_hash = None
+        self._is_scrolling = False
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._on_scroll_stop)
         self.setMinimumSize(800, 320)
     def _get_deterministic_offset(self, timestamp, scale=3.0):
         t = timestamp.timestamp()
         return scale * math.sin(t * 0.1) * math.sin(t * 0.37) * math.sin(t * 0.73)
     def set_scroll_offset(self, hours):
         old = self.scroll_offset_hours
-        self.scroll_offset_hours = max(0, min(18, hours))
+        self.scroll_offset_hours = max(0, min(60, hours))
         if abs(old - self.scroll_offset_hours) > 0.001:
+            self._is_scrolling = True
+            self._scroll_timer.start(150)
             self._buffer_valid = False
             self.update()
-    def update_data(self, hr_stream, bio_engine=None):
+    def _on_scroll_stop(self):
+        self._is_scrolling = False
+        self._buffer_valid = False
+        self.update()
+    def update_data(self, hr_stream, bio_engine=None, current_fp=None, estimated_hr=None, is_hr_estimated=False):
         new_hash = (len(hr_stream), hr_stream[-1].get('timestamp') if hr_stream else None)
         if new_hash != self._data_hash:
             self.hr_stream = hr_stream or []
@@ -2313,6 +1677,10 @@ class TimelineGraphCanvas(QWidget):
             self.estimated_hr = m.get('estimated_hr')
             self.is_hr_estimated = m.get('is_hr_estimated', False)
             self.current_fp = m.get('effective_fp')
+        else:
+            if current_fp is not None: self.current_fp = current_fp
+            if estimated_hr is not None: self.estimated_hr = estimated_hr
+            self.is_hr_estimated = is_hr_estimated
         if not self._cache_loaded:
             self._load_all_cached_data()
         if not self._buffer_valid:
@@ -2335,7 +1703,8 @@ class TimelineGraphCanvas(QWidget):
     def _rebuild_buffer(self):
         self._buffer.fill(QColor(Colors.BG_CARD))
         p = QPainter(self._buffer)
-        p.setRenderHint(QPainter.Antialiasing)
+        if not self._is_scrolling:
+            p.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
         margin = {'left': 55, 'right': 25, 'top': 35, 'bottom': 45}
         gw, gh = w - margin['left'] - margin['right'], h - margin['top'] - margin['bottom']
@@ -2352,6 +1721,7 @@ class TimelineGraphCanvas(QWidget):
         self._draw_bpm(p, view_start, view_end, margin, gw, gh)
         p.setClipping(False)
         self._draw_axis(p, margin, gh)
+        self._draw_time_axis(p, view_start, view_end, margin, gw, gh)
         self._draw_legend(p, w)
         p.end()
     def get_view_params(self):
@@ -2362,6 +1732,11 @@ class TimelineGraphCanvas(QWidget):
         gw = self.width() - margin['left'] - margin['right']
         gh = self.height() - margin['top'] - margin['bottom']
         return view_start, view_end, margin, gw, gh
+    def refresh_from_db(self):
+        self._cache_loaded = False
+        self._load_all_cached_data()
+        self._buffer_valid = False
+        self.update()
     def _load_all_cached_data(self):
         if not self.isVisible() and self._cache_loaded: return
         try:
@@ -2372,17 +1747,27 @@ class TimelineGraphCanvas(QWidget):
             cursor = conn.cursor()
             now = now_jst()
             start = now - timedelta(hours=self.CACHE_HOURS)
-            cursor.execute('SELECT timestamp, effective_fp FROM tactile_logs WHERE timestamp >= ? ORDER BY timestamp ASC', (start.isoformat(),))
-            self.cached_tactile = [dict(r) for r in cursor.fetchall()]
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='brain_metrics'")
+            if cursor.fetchone():
+                cursor.execute('SELECT timestamp, effective_fp FROM brain_metrics WHERE timestamp >= ? ORDER BY timestamp ASC', (start.isoformat(),))
+                self.cached_tactile = [dict(r) for r in cursor.fetchall()]
+            else:
+                self.cached_tactile = []
+            if not self.cached_tactile:
+                cursor.execute('SELECT timestamp, effective_fp FROM tactile_logs WHERE timestamp >= ? AND effective_fp IS NOT NULL ORDER BY timestamp ASC', (start.isoformat(),))
+                self.cached_tactile = [dict(r) for r in cursor.fetchall()]
             cursor.execute('SELECT id, start_time, end_time FROM shisha_logs WHERE start_time >= ? OR end_time >= ? OR end_time IS NULL ORDER BY start_time', (start.isoformat(), start.isoformat()))
             self.cached_shisha = []
             for r in cursor.fetchall():
                 st = datetime.fromisoformat(r['start_time']).replace(tzinfo=JST) if r['start_time'] else None
                 et = datetime.fromisoformat(r['end_time']).replace(tzinfo=JST) if r['end_time'] else None
                 if st: self.cached_shisha.append({'start': st, 'end': et})
+            cursor.execute('SELECT timestamp, bpm, source FROM heartrate_logs WHERE timestamp >= ? ORDER BY timestamp ASC', (start.isoformat(),))
+            self.hr_stream = [{'timestamp': r['timestamp'], 'bpm': r['bpm'], 'source': r['source']} for r in cursor.fetchall()]
             conn.close()
             self._cache_loaded = True
-        except: pass
+        except Exception as e:
+            print(f"[Timeline] Cache load error: {e}")
     def _draw_context_bg(self, p, vs, ve, m, gw, gh):
         vh = self.VIEW_WINDOW_HOURS
         sc = QColor(self.COLOR_SHISHA_BG)
@@ -2394,29 +1779,94 @@ class TimelineGraphCanvas(QWidget):
             r2 = min(1, (et - vs).total_seconds() / (vh * 3600))
             x1, x2 = m['left'] + r1 * gw, m['left'] + r2 * gw
             p.fillRect(QRectF(x1, m['top'], x2 - x1, gh), sc)
+        rc = QColor(self.COLOR_REST_BG)
+        rc.setAlpha(25)
+        rest_spans = self._extract_rest_spans(vs, ve)
+        for st, et in rest_spans:
+            r1 = max(0, (st - vs).total_seconds() / (vh * 3600))
+            r2 = min(1, (et - vs).total_seconds() / (vh * 3600))
+            x1, x2 = m['left'] + r1 * gw, m['left'] + r2 * gw
+            p.fillRect(QRectF(x1, m['top'], x2 - x1, gh), rc)
+    def _extract_rest_spans(self, vs, ve):
+        if not self.hr_stream: return []
+        raw_spans, cur_start, cur_end = [], None, None
+        for e in sorted(self.hr_stream, key=lambda x: x.get('timestamp', '')):
+            try:
+                ts = datetime.fromisoformat(e['timestamp'])
+                if ts.tzinfo is None: ts = ts.replace(tzinfo=JST)
+                src = e.get('source', 'awake')
+                if src == 'rest':
+                    if cur_start is None: cur_start = ts
+                    cur_end = ts
+                else:
+                    if cur_start is not None:
+                        raw_spans.append((cur_start, cur_end))
+                        cur_start, cur_end = None, None
+            except: continue
+        if cur_start is not None: raw_spans.append((cur_start, cur_end))
+        sleep_spans = []
+        for st, et in raw_spans:
+            dur_min = (et - st).total_seconds() / 60
+            h = st.hour
+            is_night = h >= 18 or h <= 10
+            if dur_min >= 90 and is_night:
+                sleep_spans.append((st, et + timedelta(minutes=5)))
+        self._cached_sleep_spans = sleep_spans
+        return [(st, et) for st, et in sleep_spans if not (et < vs or st > ve)]
     def _draw_grid(self, p, vs, ve, m, gw, gh):
         vh = self.VIEW_WINDOW_HOURS
+        graph_bottom = m['top'] + gh
         p.setPen(QPen(QColor(Colors.BORDER), 1, Qt.DotLine))
         for i in range(4):
             y = m['top'] + (i / 4) * gh
             p.drawLine(int(m['left']), int(y), int(m['left'] + gw), int(y))
-        p.setPen(QPen(QColor(Colors.BORDER), 1, Qt.SolidLine))
         for i in range(13):
             ratio = i / 12
             x = m['left'] + ratio * gw
             lt = vs + timedelta(hours=ratio * vh)
-            if lt.hour == 0 and lt.minute < 60:
-                p.setPen(QPen(QColor('#E74C3C'), 2, Qt.SolidLine))
-                p.drawLine(int(x), int(m['top']), int(x), int(m['top'] + gh))
-                p.setPen(QColor('#E74C3C'))
-                p.setFont(Fonts.label(8))
-                p.drawText(int(x - 20), int(self.height() - 15), lt.strftime('%m/%d'))
+            is_midnight = lt.hour == 0 and lt.minute < 60
+            if is_midnight:
+                grad = QLinearGradient(x, m['top'], x, graph_bottom)
+                grad.setColorAt(0, QColor(231, 76, 60, 200))
+                grad.setColorAt(0.5, QColor(231, 76, 60, 80))
+                grad.setColorAt(1, QColor(231, 76, 60, 200))
+                p.setPen(QPen(QBrush(grad), 2))
             else:
                 p.setPen(QPen(QColor(Colors.BORDER), 1, Qt.SolidLine))
-                p.drawLine(int(x), int(m['top']), int(x), int(m['top'] + gh))
+            p.drawLine(int(x), int(m['top']), int(x), int(graph_bottom))
+    def _draw_time_axis(self, p, vs, ve, m, gw, gh):
+        vh = self.VIEW_WINDOW_HOURS
+        h = self.height()
+        graph_bottom = m['top'] + gh
+        last_date = None
+        for i in range(13):
+            ratio = i / 12
+            x = m['left'] + ratio * gw
+            lt = vs + timedelta(hours=ratio * vh)
+            is_midnight = lt.hour == 0 and lt.minute < 60
+            current_date = lt.strftime('%m/%d')
+            p.setPen(QColor(Colors.BORDER))
+            p.drawLine(int(x), int(graph_bottom), int(x), int(graph_bottom + 4))
             if i % 2 == 0:
-                p.setPen(QColor(Colors.TEXT_DIM))
-                p.drawText(int(x - 15), int(self.height() - 30), lt.strftime('%H:%M'))
+                if is_midnight:
+                    p.setFont(Fonts.number(9, True))
+                    p.setPen(QColor('#E74C3C'))
+                    p.drawText(int(x - 22), h - 8, current_date)
+                    p.setFont(Fonts.label(8))
+                    p.setPen(QColor(Colors.TEXT_DIM))
+                    p.drawText(int(x - 12), h - 22, '00:00')
+                else:
+                    p.setFont(Fonts.label(8))
+                    show_date = (i == 0) or (last_date and current_date != last_date)
+                    if show_date:
+                        p.setPen(QColor(Colors.TEXT_SECONDARY))
+                        p.drawText(int(x - 22), h - 8, current_date)
+                        p.setPen(QColor(Colors.TEXT_DIM))
+                        p.drawText(int(x - 12), h - 22, lt.strftime('%H:%M'))
+                    else:
+                        p.setPen(QColor(Colors.TEXT_DIM))
+                        p.drawText(int(x - 12), h - 15, lt.strftime('%H:%M'))
+                last_date = current_date
     def _draw_fp_bars(self, p, vs, ve, m, gw, gh):
         vh = self.VIEW_WINDOW_HOURS
         fp_max = gh * 0.5
@@ -2454,56 +1904,82 @@ class TimelineGraphCanvas(QWidget):
         vh = self.VIEW_WINDOW_HOURS
         filt = self._filter_bpm(self.hr_stream)
         if not filt: return
-        pts = []
+        raw_pts = []
         for e in sorted(filt, key=lambda x: x.get('timestamp', '')):
             try:
                 ts = datetime.fromisoformat(e['timestamp'])
                 if ts.tzinfo is None: ts = ts.replace(tzinfo=JST)
                 bpm = e.get('bpm')
                 if bpm is None: continue
-                src = e.get('source', 'oura')
+                src = e.get('source', 'awake')
                 ratio = (ts - vs).total_seconds() / (vh * 3600)
                 x = m['left'] + ratio * gw
                 yr = max(0, min(1, bpm / 120))
                 y = m['top'] + (1 - yr) * gh
-                ins = self._in_shisha(ts)
-                if ins: c = self.COLOR_BPM_SHISHA
-                elif src == 'rest': c = self.COLOR_BPM_REST
-                elif src == 'shadow': c = self.COLOR_BPM_SHADOW
+                in_shisha = self._in_shisha(ts)
+                in_sleep = any(st <= ts <= et for st, et in self._cached_sleep_spans)
+                if src == 'shadow': c = self.COLOR_BPM_SHADOW
+                elif in_shisha: c = self.COLOR_BPM_SHISHA
+                elif in_sleep: c = self.COLOR_BPM_REST
                 elif bpm > 100: c = self.COLOR_BPM_STRESS
                 else: c = self.COLOR_BPM_DEFAULT
-                pts.append({'x': x, 'y': y, 'c': c, 's': src == 'shadow', 'ts': ts})
+                raw_pts.append({'x': x, 'y': y, 'c': c, 's': src == 'shadow', 'src': src, 'ts': ts})
             except: continue
-        if len(pts) < 2: return
-        cc = pts[0]['c']
-        path = QPainterPath()
-        path.moveTo(pts[0]['x'], pts[0]['y'])
-        lp = pts[0]
+        if len(raw_pts) < 2: return
+        GAP_THRESHOLD = 300
+        INTERP_INTERVAL = 60
+        pts = [raw_pts[0]]
+        for i in range(1, len(raw_pts)):
+            gap_sec = (raw_pts[i]['ts'] - raw_pts[i-1]['ts']).total_seconds()
+            if gap_sec > GAP_THRESHOLD:
+                p1, p2 = raw_pts[i-1], raw_pts[i]
+                n_interp = max(2, int(gap_sec / INTERP_INTERVAL))
+                for j in range(1, n_interp):
+                    t = j / n_interp
+                    ix = p1['x'] + (p2['x'] - p1['x']) * t
+                    base_y = p1['y'] + (p2['y'] - p1['y']) * t
+                    wave = math.sin(t * math.pi * 4 + p1['x'] * 0.1) * 3
+                    iy = base_y + wave
+                    ic = p1['c'] if t < 0.5 else p2['c']
+                    its = p1['ts'] + timedelta(seconds=gap_sec * t)
+                    pts.append({'x': ix, 'y': iy, 'c': ic, 's': False, 'src': 'interp', 'ts': its})
+            pts.append(raw_pts[i])
+        def catmull_rom_spline(v0, v1, v2, v3, t):
+            t2, t3 = t * t, t * t * t
+            return 0.5 * ((2 * v1) + (-v0 + v2) * t + (2*v0 - 5*v1 + 4*v2 - v3) * t2 + (-v0 + 3*v1 - 3*v2 + v3) * t3)
+        def draw_smooth_segment(seg_pts, color):
+            if len(seg_pts) < 2: return
+            path = QPainterPath()
+            path.moveTo(seg_pts[0]['x'], seg_pts[0]['y'])
+            for i in range(len(seg_pts) - 1):
+                i0 = seg_pts[max(0, i - 1)]
+                i1 = seg_pts[i]
+                i2 = seg_pts[min(len(seg_pts) - 1, i + 1)]
+                i3 = seg_pts[min(len(seg_pts) - 1, i + 2)]
+                for t in [0.25, 0.5, 0.75, 1.0]:
+                    nx = catmull_rom_spline(i0['x'], i1['x'], i2['x'], i3['x'], t)
+                    ny = catmull_rom_spline(i0['y'], i1['y'], i2['y'], i3['y'], t)
+                    path.lineTo(nx, ny)
+            pen = QPen(QColor(color), 2.5)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.drawPath(path)
+        segments = []
+        cur_seg = [pts[0]]
+        cur_color = pts[0]['c']
         for i in range(1, len(pts)):
             pt = pts[i]
-            if pt['c'] != cc:
-                path.lineTo(pt['x'], pt['y'])
-                pen = QPen(QColor(cc), 2.5)
-                pen.setCapStyle(Qt.RoundCap)
-                pen.setJoinStyle(Qt.RoundJoin)
-                p.setPen(pen)
-                p.drawPath(path)
-                path = QPainterPath()
-                path.moveTo(pt['x'], pt['y'])
-                cc = pt['c']
+            if pt['c'] == cur_color:
+                cur_seg.append(pt)
             else:
-                if pt['s']:
-                    mt = lp['ts'] + (pt['ts'] - lp['ts']) / 2
-                    mx = (lp['x'] + pt['x']) / 2
-                    my = (lp['y'] + pt['y']) / 2 + self._get_deterministic_offset(mt, 2.0)
-                    path.lineTo(mx, my)
-                path.lineTo(pt['x'], pt['y'])
-            lp = pt
-        pen = QPen(QColor(cc), 2.5)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        p.setPen(pen)
-        p.drawPath(path)
+                cur_seg.append(pt)
+                segments.append((cur_seg, cur_color))
+                cur_seg = [pt]
+                cur_color = pt['c']
+        if cur_seg: segments.append((cur_seg, cur_color))
+        for seg, color in segments:
+            draw_smooth_segment(seg, color)
         if self.is_hr_estimated and self.estimated_hr:
             now = now_jst()
             ratio = (now - vs).total_seconds() / (vh * 3600)
@@ -2512,10 +1988,14 @@ class TimelineGraphCanvas(QWidget):
             y = m['top'] + (1 - yr) * gh
             if pts:
                 lx, ly = pts[-1]['x'], pts[-1]['y']
+                dx = x - lx
+                path = QPainterPath()
+                path.moveTo(lx, ly)
+                path.cubicTo(lx + dx * 0.4, ly, lx + dx * 0.6, y, x, y)
                 sp = QPen(QColor(self.COLOR_BPM_SHADOW), 2.0)
                 sp.setCapStyle(Qt.RoundCap)
                 p.setPen(sp)
-                p.drawLine(QPointF(lx, ly), QPointF(x, y))
+                p.drawPath(path)
             p.setBrush(QColor(self.COLOR_BPM_SHADOW))
             p.setPen(Qt.NoPen)
             p.drawEllipse(QPointF(x, y), 4, 4)
@@ -2719,33 +2199,54 @@ class TimelineOverlay(QWidget):
 
 
 class TimelineGraphContainer(QWidget):
-    """v5.4.0 Dual-Layer Architecture - Container (Canvas + Overlay)"""
+    """v6.2.14 Dual-Layer Architecture - Container with ScrollBar (3 days)"""
+    MAX_SCROLL = 60
     def __init__(self):
         super().__init__()
         self.canvas = TimelineGraphCanvas()
         self.overlay = TimelineOverlay(self.canvas)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.canvas)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addWidget(self.canvas, 1)
+        self.scrollbar = QScrollBar(Qt.Horizontal)
+        self.scrollbar.setRange(0, self.MAX_SCROLL)
+        self.scrollbar.setValue(self.MAX_SCROLL)
+        self.scrollbar.setPageStep(12)
+        self.scrollbar.valueChanged.connect(self._on_scrollbar_changed)
+        self.scrollbar.setStyleSheet("QScrollBar:horizontal{height:14px;background:#1A1A1A;border-radius:7px;}QScrollBar::handle:horizontal{background:#444;border-radius:6px;min-width:50px;}QScrollBar::handle:horizontal:hover{background:#555;}QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;}")
+        main_layout.addWidget(self.scrollbar)
         self.overlay.setParent(self)
         self.overlay.raise_()
-        self.setMinimumSize(800, 320)
+        self.overlay.on_scroll_changed = self._sync_scrollbar
+        self.setMinimumSize(800, 340)
+    def _on_scrollbar_changed(self, value):
+        offset = self.MAX_SCROLL - value
+        self.canvas.set_scroll_offset(offset)
+    def _sync_scrollbar(self, offset):
+        self.scrollbar.blockSignals(True)
+        self.scrollbar.setValue(self.MAX_SCROLL - int(offset))
+        self.scrollbar.blockSignals(False)
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        step = 2 if delta > 0 else -2
+        new_val = max(0, min(self.MAX_SCROLL, self.canvas.scroll_offset_hours + step))
+        self.canvas.set_scroll_offset(new_val)
+        self._sync_scrollbar(new_val)
+        event.accept()
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.overlay.setGeometry(0, 0, self.width(), self.height())
-    def update_data(self, hr_stream, bio_engine=None):
-        self.canvas.update_data(hr_stream, bio_engine)
+        self.overlay.setGeometry(0, 0, self.width(), self.canvas.height())
+    def update_data(self, hr_stream, bio_engine=None, current_fp=None, estimated_hr=None, is_hr_estimated=False):
+        self.canvas.update_data(hr_stream, bio_engine, current_fp, estimated_hr, is_hr_estimated)
         self.overlay._hr_timestamps = []
         self.overlay._fp_timestamps = []
 
 
 class AnalysisTab(QWidget):
-    """v5.4.0 Dual-Layer Architecture - Analysis Tab"""
+    """v6.1.0 DB-centric SSOT Analysis Tab"""
     def __init__(self):
         super().__init__()
-        db_path = ROOT_PATH / "Data"
-        self.bio_engine = BioEngine(readiness=75, db_path=db_path) if ENGINE_AVAILABLE else BioEngine()
         self.hr_stream = []
         try:
             from core.database import LifeOSDatabase
@@ -2756,7 +2257,7 @@ class AnalysisTab(QWidget):
         self.initUI()
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_analysis)
-        self.update_timer.start(2000)
+        self.update_timer.start(5000)
     def _initialize_from_db(self):
         try:
             db_path = ROOT_PATH / "Data" / "life_os.db"
@@ -2771,22 +2272,13 @@ class AnalysisTab(QWidget):
             conn.close()
             if rows:
                 self.hr_stream = [{'timestamp': r['timestamp'], 'bpm': r['bpm'], 'source': r['source']} for r in rows]
-                lr = rows[-1]
-                ts = datetime.fromisoformat(lr['timestamp'])
-                if ts.tzinfo is None: ts = ts.replace(tzinfo=JST)
-                self.bio_engine.current_hr = lr['bpm']
-                self.bio_engine.hr_last_update = ts
-                age = (now - ts).total_seconds()
-                self.bio_engine.is_hr_estimated = age >= 300
-                if not self.bio_engine.is_hr_estimated:
-                    self.bio_engine.estimated_hr = lr['bpm']
         except: pass
     def initUI(self):
         layout = QVBoxLayout()
         layout.setSpacing(10)
         layout.setContentsMargins(15, 15, 15, 15)
         tr = QHBoxLayout()
-        title = QLabel("📊 Analysis - 12h Timeline (Drag for 24h)")
+        title = QLabel("📊 Analysis - 12h Timeline (Drag for 7 days)")
         title.setFont(Fonts.number(16, True))
         title.setStyleSheet(f"color: {Colors.CYAN};")
         tr.addWidget(title)
@@ -2827,11 +2319,9 @@ class AnalysisTab(QWidget):
         self.update_analysis()
     def update_analysis(self):
         try:
-            state = safe_read_json(STATE_PATH, {})
+            state = get_state_from_db()
             details = state.get('oura_details', {})
             bs = state.get('brain_state', {})
-            readiness = state.get('last_oura_score', 75)
-            self.bio_engine.set_readiness(readiness)
             now = now_jst()
             if self.database:
                 try:
@@ -2843,44 +2333,21 @@ class AnalysisTab(QWidget):
                 self.hr_stream = details.get('hr_stream', [])
             last_oura_ts = None
             if self.hr_stream:
-                try:
-                    le = self.hr_stream[-1]
-                    lts = datetime.fromisoformat(le['timestamp'])
-                    if lts.tzinfo is None: lts = lts.replace(tzinfo=JST)
-                    lsrc = le.get('source', 'unknown')
-                    lbpm = le.get('bpm')
-                    self.bio_engine.current_hr = lbpm
-                    if lsrc == 'shadow':
-                        self.bio_engine.is_hr_estimated = True
-                        self.bio_engine.estimated_hr = lbpm
-                    else:
-                        self.bio_engine.hr_last_update = lts
-                        age = (now - lts).total_seconds()
-                        if age >= 300:
-                            self.bio_engine.is_hr_estimated = True
-                            apm = bs.get('apm', 0) or 0
-                            ms = bs.get('mouse_speed', 0) or 0
-                            wh = self.bio_engine.continuous_work_hours
-                            self.bio_engine.estimated_hr = self.bio_engine.shadow_hr.predict(base_hr=self.bio_engine.baseline_hr, apm=apm, mouse_speed=ms, work_hours=wh)
-                        else:
-                            self.bio_engine.is_hr_estimated = False
-                            self.bio_engine.estimated_hr = lbpm
-                    for e in reversed(self.hr_stream):
-                        if e.get('source') == 'oura':
-                            try:
-                                ots = datetime.fromisoformat(e['timestamp'])
-                                if ots.tzinfo is None: ots = ots.replace(tzinfo=JST)
-                                last_oura_ts = ots
-                                break
-                            except: pass
-                except: pass
-            self.graph.update_data(self.hr_stream, self.bio_engine)
+                for e in reversed(self.hr_stream):
+                    if e.get('source') != 'shadow':
+                        try:
+                            ots = datetime.fromisoformat(e['timestamp'])
+                            if ots.tzinfo is None: ots = ots.replace(tzinfo=JST)
+                            last_oura_ts = ots
+                            break
+                        except: pass
+            cfp = bs.get('effective_fp')
+            ehr = bs.get('estimated_hr') or details.get('current_hr')
+            ise = bs.get('is_hr_estimated', False)
+            self.graph.update_data(self.hr_stream, None, current_fp=cfp, estimated_hr=ehr, is_hr_estimated=ise)
+            self.graph.canvas.refresh_from_db()
             trhr = details.get('true_rhr')
             self.stats_labels['true_rhr'].setText(f"{trhr} bpm" if trhr else "--")
-            if trhr: self.bio_engine.set_baseline_hr(trhr)
-            m = self.bio_engine.get_health_metrics()
-            ise = m.get('is_hr_estimated', False)
-            ehr = m.get('estimated_hr')
             if ise and ehr is not None:
                 j = random.randint(-2, 3)
                 dhr = ehr + j
@@ -2893,7 +2360,6 @@ class AnalysisTab(QWidget):
             else:
                 self.stats_labels['current_hr'].setText("--")
                 self.stats_labels['current_hr'].setStyleSheet(f"color: {Colors.TEXT_DIM};")
-            cfp = bs.get('effective_fp')
             self.stats_labels['current_fp'].setText(f"{cfp:.1f}" if cfp is not None else "--")
             if details.get('wake_anchor_iso'):
                 try:
@@ -2927,9 +2393,9 @@ class AnalysisTab(QWidget):
 
 # ==================== Settings Tab ====================
 class SettingsTab(QWidget):
-    """v4.2.1: 設定タブ（Audio Engine + Multi-Slot Ambient）"""
+    """v6.0.1: 設定タブ（Audio Engine + Multi-Slot Ambient）"""
     
-    # v4.2.1: 環境音ソース一覧（Rain/Fireのみ）
+    # v6.0.1: 環境音ソース一覧（Rain/Fireのみ）
     AMBIENT_SOURCES = ['Rain', 'Fire']
     
     def __init__(self, neuro_sound=None):
@@ -2988,7 +2454,7 @@ class SettingsTab(QWidget):
         self.audio_enabled_check.stateChanged.connect(self._on_audio_enabled_changed)
         audio_main_layout.addWidget(self.audio_enabled_check)
         
-        # v4.2.1: QGridLayout でボリュームコントロールを整列
+        # v6.0.1: QGridLayout でボリュームコントロールを整列
         volume_grid = QGridLayout()
         volume_grid.setColumnStretch(1, 1)  # スライダー列を伸縮
         volume_grid.setColumnMinimumWidth(0, 70)   # ラベル列
@@ -3052,7 +2518,7 @@ class SettingsTab(QWidget):
         ambient_header.setAlignment(Qt.AlignCenter)
         audio_main_layout.addWidget(ambient_header)
         
-        # v4.2.1: Ambient Slots を QGridLayout で配置
+        # v6.0.1: Ambient Slots を QGridLayout で配置
         ambient_grid = QGridLayout()
         ambient_grid.setColumnStretch(2, 1)  # スライダー列を伸縮
         ambient_grid.setColumnMinimumWidth(0, 55)   # チェック列
@@ -3172,14 +2638,14 @@ class SettingsTab(QWidget):
         interval_grid = QGridLayout()
         interval_grid.setSpacing(8)
         interval_grid.addWidget(QLabel("Min Interval:"), 0, 0)
-        self.learning_min_spin = QSpinBox()
+        self.learning_min_spin = NoScrollSpinBox()
         self.learning_min_spin.setRange(30, 600)
         self.learning_min_spin.setValue(audio_cfg.get('learning_interval_min', 120))
         self.learning_min_spin.setSuffix(" sec")
         self.learning_min_spin.setStyleSheet(f"QSpinBox{{background-color:{Colors.BG_ELEVATED};color:{Colors.CYAN};border:1px solid {Colors.BORDER};border-radius:4px;padding:5px 8px;}}")
         interval_grid.addWidget(self.learning_min_spin, 0, 1)
         interval_grid.addWidget(QLabel("Max Interval:"), 0, 2)
-        self.learning_max_spin = QSpinBox()
+        self.learning_max_spin = NoScrollSpinBox()
         self.learning_max_spin.setRange(60, 900)
         self.learning_max_spin.setValue(audio_cfg.get('learning_interval_max', 300))
         self.learning_max_spin.setSuffix(" sec")
@@ -3350,6 +2816,11 @@ class HomeTab(QWidget):
         self.threshold_off_spin.setValue(thresholds.get('off', 60))
         self.threshold_low_spin.setValue(thresholds.get('low', 20))
         self.threshold_high_spin.setValue(thresholds.get('high', 1))
+        if hasattr(self, 'sleep_toggle'):
+            self.sleep_toggle.setChecked(home_cfg.get('sleep_detection_enabled', False))
+        if hasattr(self, 'sleep_delay_spin'):
+            self.sleep_delay_spin.setValue(home_cfg.get('sleep_detection_minutes', 1.0))
+        self._update_toggle_styles()
         vol_profiles = home_cfg.get('volume_profiles', {'Spotify': {'enabled': False, 'volume': 20}, 'Netflix': {'enabled': False, 'volume': 20}, 'YouTube': {'enabled': False, 'volume': 20}, 'Prime Video': {'enabled': False, 'volume': 20}})
         self._rebuild_vol_profiles(vol_profiles)
     def _rebuild_vol_profiles(self, profiles: Dict):
@@ -3378,7 +2849,7 @@ class HomeTab(QWidget):
         chk.setStyleSheet("QCheckBox::indicator{width:16px;height:16px;}")
         chk.stateChanged.connect(self._save_vol_profiles)
         row.addWidget(chk, 1, Qt.AlignCenter)
-        spin = QSpinBox()
+        spin = NoScrollSpinBox()
         spin.setRange(0, 100)
         spin.setValue(volume)
         spin.setFixedWidth(70)
@@ -3418,6 +2889,7 @@ class HomeTab(QWidget):
         if home_cfg.get('hue_ip'):
             self.ambient_sync = AmbientSync(home_cfg)
             self.ambient_sync.set_status_callback(self._on_status_update)
+            self.ambient_sync.set_sleep_callback(self._on_sleep_state_changed)
             if home_cfg.get('auto_start', False):
                 self.ambient_sync.start()
                 self.ambient_sync.set_enabled(True)
@@ -3427,6 +2899,11 @@ class HomeTab(QWidget):
                     self.ambient_sync.start()
                 self.ambient_sync.set_focus_lighting(True)
                 self.focus_toggle.setChecked(True)
+            if home_cfg.get('sleep_detection_enabled', False):
+                if not self.ambient_sync.is_running():
+                    self.ambient_sync.start()
+                self.ambient_sync.set_sleep_detection(True, home_cfg.get('sleep_detection_minutes', 1.0))
+                self.sleep_toggle.setChecked(True)
             self._update_toggle_styles()
     def initUI(self):
         main_layout = QVBoxLayout()
@@ -3479,7 +2956,7 @@ class HomeTab(QWidget):
         logic_layout = QGridLayout()
         logic_layout.setSpacing(8)
         logic_layout.addWidget(QLabel("Hue >"), 0, 0)
-        self.threshold_off_spin = QSpinBox()
+        self.threshold_off_spin = NoScrollSpinBox()
         self.threshold_off_spin.setRange(0, 100)
         self.threshold_off_spin.setSuffix("%")
         self.threshold_off_spin.setStyleSheet(self.SPIN_STYLE)
@@ -3488,7 +2965,7 @@ class HomeTab(QWidget):
         lbl_off.setStyleSheet("font-size:12pt;")
         logic_layout.addWidget(lbl_off, 0, 2)
         logic_layout.addWidget(QLabel("Hue >"), 1, 0)
-        self.threshold_low_spin = QSpinBox()
+        self.threshold_low_spin = NoScrollSpinBox()
         self.threshold_low_spin.setRange(0, 100)
         self.threshold_low_spin.setSuffix("%")
         self.threshold_low_spin.setStyleSheet(self.SPIN_STYLE)
@@ -3497,7 +2974,7 @@ class HomeTab(QWidget):
         lbl_low.setStyleSheet("font-size:12pt;")
         logic_layout.addWidget(lbl_low, 1, 2)
         logic_layout.addWidget(QLabel("Hue ≤"), 2, 0)
-        self.threshold_high_spin = QSpinBox()
+        self.threshold_high_spin = NoScrollSpinBox()
         self.threshold_high_spin.setRange(0, 100)
         self.threshold_high_spin.setSuffix("%")
         self.threshold_high_spin.setStyleSheet(self.SPIN_STYLE)
@@ -3537,6 +3014,12 @@ class HomeTab(QWidget):
         self.focus_toggle.setCursor(Qt.PointingHandCursor)
         self.focus_toggle.clicked.connect(self._toggle_focus)
         control_layout.addWidget(self.focus_toggle)
+        self.sleep_toggle = QPushButton("🌙")
+        self.sleep_toggle.setCheckable(True)
+        self.sleep_toggle.setFixedSize(50, 50)
+        self.sleep_toggle.setCursor(Qt.PointingHandCursor)
+        self.sleep_toggle.clicked.connect(self._toggle_sleep_detection)
+        control_layout.addWidget(self.sleep_toggle)
         self._update_toggle_styles()
         self.apply_btn = QPushButton("💾 Apply && Connect")
         self.apply_btn.setMinimumHeight(50)
@@ -3546,6 +3029,24 @@ class HomeTab(QWidget):
         self.apply_btn.clicked.connect(self._apply_and_connect)
         control_layout.addWidget(self.apply_btn, 1)
         layout.addLayout(control_layout)
+        sleep_group = QGroupBox("🌙 Sleep Detection")
+        sleep_group.setStyleSheet(self.GROUP_STYLE)
+        sleep_layout = QHBoxLayout()
+        sleep_layout.setSpacing(12)
+        sleep_layout.addWidget(QLabel("Lights off delay:"))
+        self.sleep_delay_spin = NoScrollDoubleSpinBox()
+        self.sleep_delay_spin.setRange(0.5, 30.0)
+        self.sleep_delay_spin.setSingleStep(0.5)
+        self.sleep_delay_spin.setSuffix(" min")
+        self.sleep_delay_spin.setValue(config.get('home', {}).get('sleep_detection_minutes', 1.0))
+        self.sleep_delay_spin.setStyleSheet(self.SPIN_STYLE.replace("QSpinBox", "QDoubleSpinBox"))
+        sleep_layout.addWidget(self.sleep_delay_spin)
+        sleep_layout.addStretch()
+        sleep_info = QLabel("TV+Monitors off when Hue Room lights off")
+        sleep_info.setStyleSheet(f"color:{Colors.TEXT_DIM};font-size:9pt;")
+        sleep_layout.addWidget(sleep_info)
+        sleep_group.setLayout(sleep_layout)
+        layout.addWidget(sleep_group)
         conn_group = QGroupBox("🔌 Connection Settings")
         conn_group.setStyleSheet(self.GROUP_STYLE)
         conn_layout = QGridLayout()
@@ -3580,6 +3081,7 @@ class HomeTab(QWidget):
         off_style = f"QPushButton{{background:{Colors.BG_ELEVATED};color:{Colors.TEXT_DIM};border:1px solid {Colors.BORDER};border-radius:6px;font-size:16px;}}QPushButton:hover{{background:#3a3a3a;}}"
         self.sync_toggle.setStyleSheet(on_style if self.sync_toggle.isChecked() else off_style)
         self.focus_toggle.setStyleSheet(on_style if self.focus_toggle.isChecked() else off_style)
+        self.sleep_toggle.setStyleSheet(on_style if self.sleep_toggle.isChecked() else off_style)
     def _toggle_focus(self):
         self._update_toggle_styles()
         enabled = self.focus_toggle.isChecked()
@@ -3598,6 +3100,29 @@ class HomeTab(QWidget):
         if 'home' not in config: config['home'] = {}
         config['home']['focus_lighting'] = enabled
         safe_write_json(CONFIG_PATH, config)
+    def _toggle_sleep_detection(self):
+        self._update_toggle_styles()
+        enabled = self.sleep_toggle.isChecked()
+        delay = self.sleep_delay_spin.value()
+        if not self.ambient_sync:
+            if not self._create_ambient_sync():
+                self.sleep_toggle.setChecked(False)
+                self._update_toggle_styles()
+                return
+        if not self.ambient_sync.is_running():
+            if not self.ambient_sync.start():
+                self.sleep_toggle.setChecked(False)
+                self._update_toggle_styles()
+                return
+        self.ambient_sync.set_sleep_detection(enabled, delay)
+        self.ambient_sync.set_sleep_callback(self._on_sleep_state_changed)
+        global config
+        if 'home' not in config: config['home'] = {}
+        config['home']['sleep_detection_enabled'] = enabled
+        config['home']['sleep_detection_minutes'] = delay
+        safe_write_json(CONFIG_PATH, config)
+    def _on_sleep_state_changed(self, is_sleeping: bool):
+        gui_push_command('SLEEP_DETECTED' if is_sleeping else 'WAKE_MONITORS')
     def _toggle_sync(self):
         self._update_toggle_styles()
         if not self.ambient_sync:
@@ -3636,7 +3161,9 @@ class HomeTab(QWidget):
             },
             'volume_profiles': vol_profiles,
             'auto_start': self.sync_toggle.isChecked(),
-            'focus_lighting': self.focus_toggle.isChecked()
+            'focus_lighting': self.focus_toggle.isChecked(),
+            'sleep_detection_enabled': self.sleep_toggle.isChecked() if hasattr(self, 'sleep_toggle') else False,
+            'sleep_detection_minutes': self.sleep_delay_spin.value() if hasattr(self, 'sleep_delay_spin') else 1.0
         }
     def _apply_and_connect(self):
         global config
@@ -3749,7 +3276,7 @@ class LogTab(QWidget):
 # ==================== Main Window ====================
 class LifeOSGUI(QMainWindow):
     """
-    v3.8.4 - Perfect Timeline
+    v6.0.1 - Perfect Timeline
     グラフループ修正 + スクロールUX改善 + 日付表示
     """
     
@@ -3763,7 +3290,7 @@ class LifeOSGUI(QMainWindow):
         self.initUI()
         self._auto_start_daemon()
         
-        # v3.3.3: 終了時のクリーンアップを登録
+        # v6.0.1: 終了時のクリーンアップを登録
         atexit.register(self._cleanup_daemon)
     
     def _init_database(self):
@@ -3780,7 +3307,7 @@ class LifeOSGUI(QMainWindow):
         self.setWindowTitle('LifeOS v5.3.0')
         self.setMinimumSize(950, 750)
         
-        # v3.3.3: QSSを読み込み（基本スタイルはQSSから）
+        # v6.0.1: QSSを読み込み（基本スタイルはQSSから）
         stylesheet = load_stylesheet()
         if stylesheet:
             self.setStyleSheet(stylesheet)
@@ -3805,7 +3332,7 @@ class LifeOSGUI(QMainWindow):
         title_layout = QHBoxLayout(title_bar)
         title_layout.setContentsMargins(10, 0, 10, 0)
         
-        # v3.3.3: Traffic lights with objectName
+        # v6.0.1: Traffic lights with objectName
         btn_configs = [
             ('#FF5F57', 'closeButton', self.close),
             ('#FEBC2E', 'minimizeButton', self.showMinimized),
@@ -3821,7 +3348,7 @@ class LifeOSGUI(QMainWindow):
         
         title_layout.addSpacing(15)
         
-        title = QLabel("LifeOS v4.7.3")
+        title = QLabel("LifeOS v6.0.1")
         title.setObjectName("windowTitle")
         title.setFont(Fonts.label(11, True))
         title.setStyleSheet(f"color: {Colors.CYAN};")
@@ -3835,7 +3362,7 @@ class LifeOSGUI(QMainWindow):
         
         main_layout.addWidget(title_bar)
         
-        # v4.2.1: Tabs (スタイルはstyle.qssに委譲)
+        # v6.0.1: Tabs (スタイルはstyle.qssに委譲)
         tabs = QTabWidget()
         
         # v3.0: DashboardTabを保持してneuro_sound参照を取得
@@ -3883,14 +3410,14 @@ class LifeOSGUI(QMainWindow):
         self.move(frame.topLeft())
     
     def _auto_start_daemon(self):
-        """v3.3.3: デーモンを自動起動（PIDファイルで重複起動を防止）"""
+        """v6.0.1: デーモンを自動起動（PIDファイルで重複起動を防止）"""
         daemon = ROOT_PATH / "core" / "daemon.py"
         
         if not daemon.exists():
             self.status_dot.setStyleSheet(f"color: {Colors.RED};")
             return
         
-        # v3.3.3: 既存プロセスの確認
+        # v6.0.1: 既存プロセスの確認
         if PID_PATH.exists():
             try:
                 existing_pid = int(PID_PATH.read_text().strip())
@@ -3910,15 +3437,9 @@ class LifeOSGUI(QMainWindow):
                     self.status_dot.setStyleSheet(f"color: {Colors.CYAN};")
                     return
             except (ValueError, ProcessLookupError, PermissionError, OSError):
-                # PIDファイルが古い
                 PID_PATH.unlink(missing_ok=True)
-        
         try:
-            # v3.3.3: gui_runningをTrueに設定してからデーモンを起動
-            state = safe_read_json(STATE_PATH, {})
-            state['gui_running'] = True
-            safe_write_json(STATE_PATH, state)
-            
+            gui_push_command('SET_GUI_RUNNING', True)
             self.daemon_process = subprocess.Popen(
                 [sys.executable, str(daemon)],
                 stdout=subprocess.DEVNULL,
@@ -3926,13 +3447,11 @@ class LifeOSGUI(QMainWindow):
                 cwd=str(ROOT_PATH)
             )
             self.status_dot.setStyleSheet(f"color: {Colors.CYAN};")
-            print(f"Daemon started (PID: {self.daemon_process.pid})")
         except Exception as e:
-            print(f"Failed to start daemon: {e}")
             self.status_dot.setStyleSheet(f"color: {Colors.RED};")
     
     def _cleanup_daemon(self):
-        """v3.3.3: デーモンのクリーンアップ"""
+        """v6.0.1: デーモンのクリーンアップ"""
         if self.daemon_process and self.daemon_process.poll() is None:
             print("Terminating daemon...")
             self.daemon_process.terminate()
@@ -3943,7 +3462,7 @@ class LifeOSGUI(QMainWindow):
     
     def closeEvent(self, event):
         """
-        v4.1.2: GUI終了時の処理（押し忘れ救済対応 + Audio cleanup）
+        v6.0.1: GUI終了時の処理（押し忘れ救済対応 + Audio cleanup）
         
         シーシャがActiveのまま終了する場合、
         現在時刻までをセッションとしてDBに記録する。
@@ -3956,23 +3475,16 @@ class LifeOSGUI(QMainWindow):
             # 終了を阻害しない
             print(f"v3.7 Shisha Shutdown Error: {e}")
         
-        # v4.1.2: NeuroSoundEngine cleanup
+        # v6.0.1: NeuroSoundEngine cleanup
         try:
             if hasattr(self, 'dashboard_tab') and self.dashboard_tab is not None:
                 if hasattr(self.dashboard_tab, 'neuro_sound') and self.dashboard_tab.neuro_sound:
                     self.dashboard_tab.neuro_sound.cleanup()
-                    print("v4.1.2: NeuroSoundEngine cleanup complete")
+                    print("v6.0.1: NeuroSoundEngine cleanup complete")
         except Exception as e:
-            print(f"v4.1.2 Audio Cleanup Error: {e}")
-        
-        # gui_runningをFalseに設定
-        state = safe_read_json(STATE_PATH, {})
-        state['gui_running'] = False
-        safe_write_json(STATE_PATH, state)
-        
-        # デーモンを終了
+            print(f"v6.0.1 Audio Cleanup Error: {e}")
+        gui_push_command('SET_GUI_RUNNING', False)
         self._cleanup_daemon()
-        
         event.accept()
 
 
@@ -3981,7 +3493,7 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle(QStyleFactory.create('Fusion'))
     
-    # v3.3.3: QSSを読み込み
+    # v6.0.1: QSSを読み込み
     stylesheet = load_stylesheet()
     if stylesheet:
         app.setStyleSheet(stylesheet)

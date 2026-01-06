@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Life OS Core v5.4.1"""
-try:
-    from .types import (
-        JST, now_jst,
-        HYDRATION_INTERVAL_MINUTES, AUTO_BREAK_IDLE_SECONDS, PHYSICS_TICK_INTERVAL,
-        Colors, Fonts, ActivityState, EngineState, PredictionPoint, Snapshot,
-    )
-    TYPES_AVAILABLE = True
-except ImportError as e:
-    TYPES_AVAILABLE = False
-    print(f"[core/__init__] types.py import failed: {e}")
-    from datetime import datetime, timedelta, timezone
-    JST = timezone(timedelta(hours=9))
-    def now_jst(): return datetime.now(JST)
-    HYDRATION_INTERVAL_MINUTES, AUTO_BREAK_IDLE_SECONDS, PHYSICS_TICK_INTERVAL = 90, 900, 1.0
+from .types import (
+    __version__,
+    JST, now_jst,
+    HYDRATION_INTERVAL_MINUTES, AUTO_BREAK_IDLE_SECONDS, PHYSICS_TICK_INTERVAL,
+    COMMAND_QUEUE_FILENAME,
+    Colors, Fonts, ActivityState, CommandType,
+    Command, CommandQueue,
+    EngineState, PredictionPoint, Snapshot,
+    safe_read_json, safe_write_json,
+    get_root_path, get_command_queue_path, get_state_path, get_config_path, get_db_path, get_style_path,
+    enqueue_command,
+)
+TYPES_AVAILABLE = True
 try:
     from .database import LifeOSDatabase
     DATABASE_AVAILABLE = True
@@ -38,19 +36,33 @@ except ImportError as e:
     NeuroSoundEngine = NeuroSoundController = AudioConstants = VolumeManager = None
     NeuroLinguisticCompiler = NeuroAssetGenerator = None
     print(f"[core/__init__] audio.py import failed: {e}")
+try:
+    from .home import AmbientSync, HueController, BraviaController, SleepDetector, MonitorController
+    HOME_AVAILABLE = True
+except ImportError as e:
+    HOME_AVAILABLE = False
+    AmbientSync = HueController = BraviaController = SleepDetector = MonitorController = None
+    print(f"[core/__init__] home.py import failed: {e}")
 __all__ = [
+    '__version__',
     'JST', 'now_jst',
     'HYDRATION_INTERVAL_MINUTES', 'AUTO_BREAK_IDLE_SECONDS', 'PHYSICS_TICK_INTERVAL',
-    'Colors', 'Fonts', 'ActivityState', 'EngineState', 'PredictionPoint', 'Snapshot',
+    'COMMAND_QUEUE_FILENAME',
+    'Colors', 'Fonts', 'ActivityState', 'CommandType',
+    'Command', 'CommandQueue', 'enqueue_command',
+    'EngineState', 'PredictionPoint', 'Snapshot',
+    'safe_read_json', 'safe_write_json',
+    'get_root_path', 'get_command_queue_path', 'get_state_path', 'get_config_path', 'get_db_path', 'get_style_path',
     'LifeOSDatabase',
     'BioEngine', 'ShadowHeartrate',
     'NeuroSoundEngine', 'NeuroSoundController', 'AudioConstants', 'VolumeManager',
     'NeuroLinguisticCompiler', 'NeuroAssetGenerator',
-    'TYPES_AVAILABLE', 'DATABASE_AVAILABLE', 'ENGINE_AVAILABLE', 'AUDIO_AVAILABLE',
+    'AmbientSync', 'HueController', 'BraviaController', 'SleepDetector', 'MonitorController',
+    'TYPES_AVAILABLE', 'DATABASE_AVAILABLE', 'ENGINE_AVAILABLE', 'AUDIO_AVAILABLE', 'HOME_AVAILABLE',
 ]
-__version__ = '5.4.1'
 def get_status() -> dict:
-    return {'version': __version__, 'types': TYPES_AVAILABLE, 'database': DATABASE_AVAILABLE, 'engine': ENGINE_AVAILABLE, 'audio': AUDIO_AVAILABLE}
+    return {'version': __version__, 'types': TYPES_AVAILABLE, 'database': DATABASE_AVAILABLE, 'engine': ENGINE_AVAILABLE, 'audio': AUDIO_AVAILABLE, 'home': HOME_AVAILABLE}
 if __name__ == '__main__':
-    print("=== LifeOS Core Package Status ===")
-    for k, v in get_status().items(): print(f"  {k}: {v if not isinstance(v, bool) else ('[OK]' if v else '[NG]')}")
+    print(f"=== LifeOS Core v{__version__} ===")
+    for k, v in get_status().items():
+        print(f"  {k}: {v if not isinstance(v, bool) else ('[OK]' if v else '[NG]')}")

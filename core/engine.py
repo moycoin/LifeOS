@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Life OS Daemon v4.1.2 - BioEngine (Shadow Heartrate + Awake Offset)
-
-Location: core/engine.py
-
-v4.1.2 Changes:
-- Awake Offset: 予測式に +10bpm を追加
-  覚醒時はRHRより高いはず（睡眠時RHRまで下がらない）
-  pred = base_hr + AWAKE_OFFSET + apm_component + mouse_component + work_component
-
-v3.9.0 Changes:
-- ShadowHeartrate: PC操作量から現在の心拍数を推定
-- 予測式: HR_pred = HR_base + (APM × α) + (Mouse × β) + (WorkTime × γ)
-- 学習機能: 実測値到着時に係数を自動補正
-- 予測値の可視化サポート（is_hr_estimated, estimated_hr）
-"""
-
 import json
 import math
 import sqlite3
@@ -24,9 +7,8 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple, Deque
 from collections import deque
 from pathlib import Path
-
-# types.pyから共通定義をインポート
 from .types import (
+    __version__,
     JST,
     now_jst,
     HYDRATION_INTERVAL_MINUTES,
@@ -36,13 +18,15 @@ from .types import (
     EngineState,
     PredictionPoint,
     Snapshot,
+    safe_read_json,
+    safe_write_json,
 )
 
 
 # ==================== v3.9: Shadow Heartrate ====================
 class ShadowHeartrate:
     """
-    v3.9.0: リアルタイム心拍予測モジュール
+    リアルタイム心拍予測モジュール
     
     Oura APIのデータ遅延（数時間）を埋めるため、
     PC操作量から現在の心拍数を推定する。
@@ -65,7 +49,7 @@ class ShadowHeartrate:
     DEFAULT_BETA = 0.02    # マウス移動量係数（px/secあたり）
     DEFAULT_GAMMA = 0.05   # 連続作業時間係数（時間あたり）
     
-    # v4.1.2: 覚醒時オフセット（RHRは睡眠時の最低値なので、起きている間は常に高い）
+    # 覚醒時オフセット（RHRは睡眠時の最低値なので、起きている間は常に高い）
     AWAKE_OFFSET = 10  # bpm
     
     # 学習率（保守的に設定）
@@ -105,46 +89,20 @@ class ShadowHeartrate:
         self._load_coefficients()
     
     def _load_coefficients(self):
-        """daemon_state.jsonから係数を読み込み"""
         if self.state_path is None:
             return
-        
-        try:
-            if self.state_path.exists():
-                with open(self.state_path, 'r', encoding='utf-8') as f:
-                    state = json.load(f)
-                
-                shadow_state = state.get('shadow_heartrate', {})
-                self.alpha = shadow_state.get('alpha', self.DEFAULT_ALPHA)
-                self.beta = shadow_state.get('beta', self.DEFAULT_BETA)
-                self.gamma = shadow_state.get('gamma', self.DEFAULT_GAMMA)
-                
-                print(f"v3.9 Shadow HR: Loaded coefficients (α={self.alpha:.4f}, β={self.beta:.4f}, γ={self.gamma:.4f})")
-        except Exception as e:
-            print(f"v3.9 Shadow HR: Using default coefficients (load error: {e})")
-    
+        state = safe_read_json(self.state_path, {})
+        shadow_state = state.get('shadow_heartrate', {})
+        self.alpha = shadow_state.get('alpha', self.DEFAULT_ALPHA)
+        self.beta = shadow_state.get('beta', self.DEFAULT_BETA)
+        self.gamma = shadow_state.get('gamma', self.DEFAULT_GAMMA)
+        print(f"Shadow HR: Loaded coefficients (α={self.alpha:.4f}, β={self.beta:.4f}, γ={self.gamma:.4f})")
     def _save_coefficients(self):
-        """係数をdaemon_state.jsonに保存"""
         if self.state_path is None:
             return
-        
-        try:
-            state = {}
-            if self.state_path.exists():
-                with open(self.state_path, 'r', encoding='utf-8') as f:
-                    state = json.load(f)
-            
-            state['shadow_heartrate'] = {
-                'alpha': self.alpha,
-                'beta': self.beta,
-                'gamma': self.gamma,
-                'last_updated': now_jst().isoformat(),
-            }
-            
-            with open(self.state_path, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"v3.9 Shadow HR: Failed to save coefficients: {e}")
+        state = safe_read_json(self.state_path, {})
+        state['shadow_heartrate'] = {'alpha': self.alpha, 'beta': self.beta, 'gamma': self.gamma, 'last_updated': now_jst().isoformat()}
+        safe_write_json(self.state_path, state)
     
     def predict(
         self,
@@ -166,10 +124,10 @@ class ShadowHeartrate:
             予測心拍数（45-180でクランプ）
         """
         # 予測式: HR_pred = HR_base + AWAKE_OFFSET + (APM × α) + (Mouse × β) + (WorkTime × γ)
-        # v4.1.2: AWAKE_OFFSET追加（覚醒時はRHRより常に高い）
+        # AWAKE_OFFSET追加（覚醒時はRHRより常に高い）
         apm_component = apm * self.alpha
         mouse_component = mouse_speed * self.beta
-        # v3.9.1: Cardiac Drift強化（長時間作業による心拍上昇を2倍に見積もる）
+        # Cardiac Drift強化（長時間作業による心拍上昇を2倍に見積もる）
         work_component = work_hours * self.gamma * 20  # 10 → 20
         
         pred = base_hr + self.AWAKE_OFFSET + apm_component + mouse_component + work_component
@@ -271,9 +229,9 @@ class ShadowHeartrate:
 
 class BioEngine:
     """
-    v3.4.4 BioEngine - Telemetry Polish
+    BioEngine - Telemetry Polish
     
-    v3.4.4 新機能:
+    新機能:
     - Mouse Speed (px/sec): EMA平滑化された現在のマウス速度
     - Rolling Correction Rate: 直近60秒間の修正率
     
@@ -292,7 +250,7 @@ class BioEngine:
         'critical': 0.18   # <40 : 18%/h
     }
     
-    # v3.9.1: FP計算・予測の一元化定数
+    # FP計算・予測の一元化定数
     DEBT_PENALTY_MULTIPLIER = 3.0   # 負債ペナルティ係数（5.0→3.0に緩和）
     BREAK_RECOMMEND_THRESHOLD = 20.0  # 休憩推奨FP閾値（30→20に緩和）
     BEDTIME_THRESHOLD = 10.0        # 活動限界FP閾値（15→10に緩和）
@@ -322,7 +280,7 @@ class BioEngine:
         db_path: Optional[Path] = None
     ):
         """
-        v3.4.3: Cumulative Strategy対応初期化
+        Cumulative Strategy対応初期化
         
         Args:
             readiness: Oura Readiness Score (0-100)
@@ -393,20 +351,20 @@ class BioEngine:
         # 最終更新時刻
         self.last_update = now
         
-        # v3.4.2: Physics Tick用
+        # Physics Tick用
         self.last_physics_tick = now
         self.physics_accumulated_dt = 0.0
         
-        # v3.4.2: 予測曲線キャッシュ
+        # 予測曲線キャッシュ
         self._cached_prediction: Optional[Dict[str, List[PredictionPoint]]] = None
         self._prediction_cache_time: Optional[datetime] = None
         
-        # v3.4.2: クロノタイプ動的学習
+        # クロノタイプ動的学習
         self.hourly_efficiency: Dict[int, float] = {}
         self.daily_avg_apm = 1.0  # ゼロ除算防止
         self._load_chronotype_data()
         
-        # v3.4.3: 累計値追跡（Cumulative Strategy）
+        # 累計値追跡（Cumulative Strategy）
         # Daemonから受け取った累計値を保持
         self.session_mouse_pixels = 0.0
         self.session_backspace_count = 0
@@ -420,11 +378,11 @@ class BioEngine:
         self.phantom_recovery_sum = 0.0
         self._last_phantom_recovery_sum = 0.0  # v3.5: 増分計算用
         
-        # v3.4.4: 速度計 (Speedometer)
+        # 速度計 (Speedometer)
         self.current_mouse_speed = 0.0  # px/sec (EMA平滑化)
         self._mouse_speed_ema_alpha = 0.3  # EMA係数（0.3 = 適度な平滑化）
         
-        # v3.4.4: 直近修正率 (Rolling Window)
+        # 直近修正率 (Rolling Window)
         self._rolling_backspace_window: Deque[int] = deque(maxlen=60)  # 直近60秒
         self._rolling_keys_window: Deque[int] = deque(maxlen=60)
         self.recent_correction_rate = 0.0  # 直近修正率
@@ -436,16 +394,16 @@ class BioEngine:
         # v3.5: Shisha Override
         self.is_shisha_active = False
         
-        # v3.5.1: 遡及補正 (Retroactive Correction)
+        # 遡及補正 (Retroactive Correction)
         self._last_retroactive_check = now
         self._retroactive_interval = 5.0  # 5秒に1回チェック
         self._processed_hr_timestamps: set = set()  # 処理済みタイムスタンプ
         
-        # v3.5.2: Nap Recovery（仮眠によるFP回復）
+        # Nap Recovery（仮眠によるFP回復）
         self._last_total_nap_minutes = 0.0
         self.total_nap_minutes = 0.0
         
-        # v3.5.3: Hydration（DB駆動型状態復元）
+        # Hydration（DB駆動型状態復元）
         self.cumulative_hr_deviation = 0.0  # 基準心拍からの乖離累積
         self.cumulative_load = 0.0  # 負荷の累積
         self._hydration_completed = False
@@ -472,7 +430,7 @@ class BioEngine:
     
     def _hydrate_from_db(self):
         """
-        v3.5.3: 起動時の記憶復元 (Database-Driven Physics)
+        起動時の記憶復元 (Database-Driven Physics)
         
         DBから過去24時間分の心拍データを取得し、
         エンジンの物理状態を「現在までの履歴に基づいた正しい値」に復元する。
@@ -484,13 +442,13 @@ class BioEngine:
         - base_fp: 累積負荷を反映したFP調整
         """
         if self.db_path is None:
-            print("v3.5.3 Hydration: No DB path configured, skipping")
+            print("Hydration: No DB path configured, skipping")
             return
         
         try:
             db_file = self.db_path / "life_os.db"
             if not db_file.exists():
-                print("v3.5.3 Hydration: DB file not found, starting fresh")
+                print("Hydration: DB file not found, starting fresh")
                 return
             
             conn = sqlite3.connect(str(db_file))
@@ -512,7 +470,7 @@ class BioEngine:
             conn.close()
             
             if not rows:
-                print("v3.5.3 Hydration: No HR data in last 24h, starting fresh")
+                print("Hydration: No HR data in last 24h, starting fresh")
                 return
             
             # 心拍データを時系列で走査してコンテキストを再構築
@@ -576,7 +534,7 @@ class BioEngine:
                 
                 self._hydration_completed = True
                 
-                print(f"v3.5.3 Hydration Complete: "
+                print(f"Hydration Complete: "
                       f"processed {record_count} records over 24h, "
                       f"avg_deviation={avg_deviation:.1f}bpm, "
                       f"high_hr_minutes={high_hr_minutes}, "
@@ -604,16 +562,16 @@ class BioEngine:
                 except Exception as e:
                     print(f"v3.9 Shadow HR Hydration: Timestamp parse error: {e}")
             else:
-                print("v3.5.3 Hydration: No valid records to process")
+                print("Hydration: No valid records to process")
         
         except Exception as e:
             # DB接続エラーやデータ不在時もデフォルト値で起動
-            print(f"v3.5.3 Hydration Error: {e}, starting with defaults")
+            print(f"Hydration Error: {e}, starting with defaults")
             self._hydration_completed = False
     
     def _calculate_effective_fp(self) -> float:
         """
-        v3.9.1: FP計算ロジックの一元化 (Physiological Integrity)
+        FP計算ロジックの一元化 (Physiological Integrity)
         
         effective_fpの計算式を集約し、どこから呼んでも一貫した値を返す。
         
@@ -872,14 +830,14 @@ class BioEngine:
     
     def _get_boost_efficiency(self) -> float:
         """
-        v3.4.2: ブースト効率を計算（クロノタイプ動的学習）
+        ブースト効率を計算（クロノタイプ動的学習）
         
         Eff = (AvgAPM_hour / AvgAPM_daily) × ReadinessFactor
         """
         now = now_jst()
         hour = now.hour
         
-        # v3.4.2: クロノタイプベースの時間帯補正
+        # クロノタイプベースの時間帯補正
         chronotype_factor = self.hourly_efficiency.get(hour, 1.0)
         
         # Readiness補正
@@ -889,7 +847,7 @@ class BioEngine:
     
     def _get_dynamic_repayment_rate(self) -> float:
         """
-        v3.4.2: 動的負債返済率
+        動的負債返済率
         
         RepaymentRate = 0.002 × (Readiness/80) × (SleepScore/75)
         """
@@ -940,18 +898,18 @@ class BioEngine:
     
     def _calculate_hr_stress_factor(self) -> float:
         """
-        v3.9.1: 心拍ストレス係数 (F_HR) の計算 - Shadow HR統合
+        心拍ストレス係数 (F_HR) の計算 - Shadow HR統合
         
         Formula:
             Ratio = HR_target / HR_baseline
             F_HR = clamp(1.0, 3.0, 1.0 + (Ratio - 1.0) × 2.0)
         
-        v3.9.1: 実測HRがない場合はShadow HR（予測値）を使用
+        実測HRがない場合はShadow HR（予測値）を使用
         
         Returns:
             float: 1.0 〜 3.0 のストレス係数
         """
-        # v3.9.1: Physics Integration - target_hrを決定
+        # Physics Integration - target_hrを決定
         # Shadow HRが有効な場合は予測値を使用し、物理演算に反映
         if self.is_hr_estimated and self.estimated_hr is not None:
             target_hr = self.estimated_hr
@@ -992,7 +950,7 @@ class BioEngine:
     
     def _animate_boost(self, dt_seconds: float):
         """
-        v3.4.2: Animation Tick - 軽い計算（毎フレーム）
+        Animation Tick - 軽い計算（毎フレーム）
         
         現在のboost_fpを目標値に向かってLerp
         """
@@ -1030,8 +988,8 @@ class BioEngine:
             cumulative_scroll_steps: スクロール回数（累計値）[v3.5]
             phantom_recovery_sum: Phantom Recovery総量
             hr: 現在の心拍数（実測or予測）
-            hr_stream: 心拍ストリーム [v3.5.1]
-            total_nap_minutes: 仮眠の合計時間（分）[v3.5.2]
+            hr_stream: 心拍ストリーム [v6.0.1]
+            total_nap_minutes: 仮眠の合計時間（分）[v6.0.1]
             dt_seconds: 経過秒数
             is_shisha_active: シーシャセッション中か [v3.5]
             is_hr_estimated: hrが予測値かどうか [v3.9]
@@ -1076,7 +1034,7 @@ class BioEngine:
                 self.is_hr_estimated = False
                 self.estimated_hr = self.current_hr
         
-        # v3.4.3: 累計値から差分を計算
+        # 累計値から差分を計算
         delta_mouse = max(0, cumulative_mouse_pixels - self._last_cumulative_mouse)
         delta_backspace = max(0, cumulative_backspace_count - self._last_cumulative_backspace)
         delta_keys = max(0, cumulative_key_count - self._last_cumulative_keys)
@@ -1098,14 +1056,14 @@ class BioEngine:
                 initial_fp = max(50, min(self._calculate_recovery_ceiling(), initial_fp))
                 old_fp = self.base_fp
                 self.base_fp = max(self.base_fp, initial_fp)
-                print(f"v3.5.2 Deep Sleep Detected: {delta_nap:.0f}min sleep → FP boost (base_fp: {old_fp:.1f} → {self.base_fp:.1f})")
+                print(f"Deep Sleep Detected: {delta_nap:.0f}min sleep → FP boost (base_fp: {old_fp:.1f} → {self.base_fp:.1f})")
             else:
                 NAP_RECOVERY_RATE = 1.0
                 nap_recovery = delta_nap * NAP_RECOVERY_RATE * self.recovery_efficiency
                 old_fp = self.base_fp
                 ceiling = self._calculate_recovery_ceiling()
                 self.base_fp = min(ceiling, self.base_fp + nap_recovery)
-                print(f"v5.0.4 Nap Recovery: +{delta_nap:.0f}min * {self.recovery_efficiency:.2f} → +{nap_recovery:.1f} FP (ceiling={ceiling:.0f}, base_fp: {old_fp:.1f} → {self.base_fp:.1f})")
+                print(f"Nap Recovery: +{delta_nap:.0f}min * {self.recovery_efficiency:.2f} → +{nap_recovery:.1f} FP (ceiling={ceiling:.0f}, base_fp: {old_fp:.1f} → {self.base_fp:.1f})")
         self._last_total_nap_minutes = total_nap_minutes
         self.total_nap_minutes = total_nap_minutes
         time_since_last_retro = (now - self._last_retroactive_check).total_seconds()
@@ -1119,7 +1077,7 @@ class BioEngine:
             old_fp = self.base_fp
             ceiling = self._calculate_recovery_ceiling()
             self.base_fp = min(ceiling, self.base_fp + effective_recovery)
-            print(f"v5.0.4 Fuel Injection: +{delta_phantom_recovery:.1f} * {self.recovery_efficiency:.2f} → +{effective_recovery:.1f} FP (ceiling={ceiling:.0f}, base_fp: {old_fp:.1f} → {self.base_fp:.1f})")
+            print(f"Fuel Injection: +{delta_phantom_recovery:.1f} * {self.recovery_efficiency:.2f} → +{effective_recovery:.1f} FP (ceiling={ceiling:.0f}, base_fp: {old_fp:.1f} → {self.base_fp:.1f})")
         
         # 累計値を上書き（+=ではなく=）
         self.session_mouse_pixels = cumulative_mouse_pixels
@@ -1134,7 +1092,7 @@ class BioEngine:
         self._last_cumulative_scroll = cumulative_scroll_steps  # v3.5
         self._last_phantom_recovery_sum = phantom_recovery_sum  # v3.5
         
-        # ===== v3.4.4: 速度計 (Speedometer) =====
+        # ===== 速度計 (Speedometer) =====
         if dt_seconds > 0:
             instant_speed = delta_mouse / dt_seconds
         else:
@@ -1149,7 +1107,7 @@ class BioEngine:
         if delta_mouse < 1:
             self.current_mouse_speed *= 0.5
         
-        # ===== v3.4.4: 直近修正率 (Rolling Window) =====
+        # ===== 直近修正率 (Rolling Window) =====
         self._rolling_backspace_window.append(int(delta_backspace))
         self._rolling_keys_window.append(int(delta_keys))
         self._rolling_scroll_window.append(int(delta_scroll))  # v3.5
@@ -1171,7 +1129,7 @@ class BioEngine:
         # 作業時間追跡
         self._update_work_tracking(apm, now)
         
-        # v3.9.1: リアルタイムReadiness予測 - target_hrを使用
+        # リアルタイムReadiness予測 - target_hrを使用
         # Shadow HRが有効な場合は予測値を物理演算に反映
         target_hr = self.estimated_hr if (self.is_hr_estimated and self.estimated_hr) else hr
         self._update_realtime_readiness(target_hr, dt_seconds)
@@ -1572,7 +1530,7 @@ class BioEngine:
     
     def predict_trajectory(self, minutes: int = 240) -> Dict[str, List[PredictionPoint]]:
         """
-        v3.4.2: 未来予測（キャッシュ付き）
+        未来予測（キャッシュ付き）
         """
         now = now_jst()
         
@@ -1618,7 +1576,7 @@ class BioEngine:
             
             boost_eff = self._cached_boost_efficiency
             
-            # v3.9.1: 定数を使用（バグ修正 - 5.0→DEBT_PENALTY_MULTIPLIER）
+            # 定数を使用（バグ修正 - 5.0→DEBT_PENALTY_MULTIPLIER）
             fp_continue = sim_base_continue + (sim_boost_continue * boost_eff) - (sim_debt_continue * self.DEBT_PENALTY_MULTIPLIER)
             fp_rest = sim_base_rest + (sim_boost_rest * boost_eff) - (sim_debt_rest * self.DEBT_PENALTY_MULTIPLIER)
             
@@ -1643,7 +1601,7 @@ class BioEngine:
         return result
     
     def get_recommended_break_time(self) -> datetime:
-        """v3.9.1: 推奨休憩時刻（閾値定数化）"""
+        """推奨休憩時刻（閾値定数化）"""
         now = now_jst()
         
         # 水分補給限界
@@ -1661,7 +1619,7 @@ class BioEngine:
         return min(hydration_limit, fp_limit)
     
     def get_exhaustion_time(self) -> datetime:
-        """v3.9.1: 消耗予測時刻（閾値定数化）"""
+        """消耗予測時刻（閾値定数化）"""
         now = now_jst()
         prediction = self.predict_trajectory(480)
         
@@ -1769,7 +1727,7 @@ class BioEngine:
             'boost_efficiency': self._cached_boost_efficiency,
             'debt': self.debt,
             
-            # 計算過程（v3.9.1: 定数使用に統一）
+            # 計算過程（定数使用に統一）
             'boosted_fp': self.boost_fp * self._cached_boost_efficiency,
             'debt_penalty': self.debt * self.DEBT_PENALTY_MULTIPLIER,
             'raw_fp': self.base_fp + (self.boost_fp * self._cached_boost_efficiency) - (self.debt * self.DEBT_PENALTY_MULTIPLIER),
@@ -1788,7 +1746,7 @@ class BioEngine:
             'using_default_chronotype': self._using_default_chronotype,
             'chronotype_blend_ratio': getattr(self, '_chronotype_blend_ratio', 0.0),
             
-            # 計算式（文字列）v3.9.1: 定数使用
+            # 計算式（文字列）定数使用
             'formula': f"FP_eff = clamp(10, 100, {self.base_fp:.2f} + ({self.boost_fp:.2f} × {self._cached_boost_efficiency:.2f}) - ({self.debt:.2f} × {self.DEBT_PENALTY_MULTIPLIER})) = {effective_fp:.2f}",
         }
     

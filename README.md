@@ -36,7 +36,7 @@
 
 | Dashboard | Analysis Timeline |
 |:---------:|:-----------------:|
-| ![Dashboard](dashboard.png) | ![Analysis](screenshots/analysis.png) |
+| ![Dashboard](screenshots/dashboard.png) | ![Analysis](screenshots/analysis.png) |
 
 </div>
 

@@ -1,58 +1,26 @@
 {
   "oura": {
     "api_token": "YOUR_OURA_API_TOKEN_HERE",
-    "rhr": 50
-  },
-  "shisha": {
-    "ignition_time": 930,
-    "ventilation_time": 240,
-    "heat_soak_time": 510,
-    "calibration_time": 180,
-    "cruise_time": 3000
+    "rhr": 45
   },
   "audio": {
     "enabled": true,
-    "master_volume": 1.0,
-    "bgm_enabled": false,
-    "bgm_volume": 0.0,
-    "voice_enabled": true,
-    "voice_volume": 0.22,
-    "sfx_volume": 0.5,
-    "headphone_mode": false,
-    "device_type": "headphone",
-    "bas_enabled": true,
-    "fade_duration_ms": 4000,
-    "duck_ratio": 0.3,
-    "voice_cooldown_sec": 5,
-    "state_inertia_seconds": 30,
-    "learning_interval_min": 120,
-    "learning_interval_max": 300,
-    "ambient_slots": [
-      {"source": "Rain", "volume": 0.15, "enabled": false},
-      {"source": "Fire", "volume": 0.15, "enabled": false},
-      {"source": "Rain", "volume": 0.15, "enabled": false}
-    ],
-    "shisha_volume": 0.6
-  },
-  "openai": {
-    "enabled": false,
-    "api_key": "YOUR_OPENAI_API_KEY_HERE",
-    "voice": "nova"
+    "bgm_volume": 0.08,
+    "ambient_volume": 0.15,
+    "voice_volume": 0.5,
+    "state_inertia_seconds": 30
   },
   "home": {
-    "hue_ip": "192.168.x.x",
-    "hue_room": "Living Room",
-    "bravia_ip": "192.168.x.x",
-    "bravia_psk": "0000",
-    "thresholds": {"off": 50, "low": 20, "high": 4},
-    "volume_profiles": {
-      "Spotify": {"enabled": true, "volume": 20},
-      "Netflix": {"enabled": true, "volume": 36},
-      "YouTube": {"enabled": true, "volume": 22},
-      "Prime Video": {"enabled": true, "volume": 30},
-      "VLC": {"enabled": true, "volume": 30}
-    },
-    "auto_start": false,
-    "focus_lighting": false
+    "hue_bridge_ip": "",
+    "hue_room": "Office",
+    "bravia_ip": "",
+    "bravia_psk": ""
+  },
+  "openai": {
+    "api_key": ""
+  },
+  "shisha": {
+    "voice_enabled": true,
+    "voice_actor": "shimmer"
   }
 }

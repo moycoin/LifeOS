@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Life OS Daemon v5.4.1 - Extended Time Horizon (7-Day Fetch)
-Location: core/daemon.py
-v5.4.1: Oura API取得範囲を7日間に拡大、日付判定緩和
-"""
-
 import os
 import sys
-import json
 import time
 import math
 import signal
@@ -21,49 +14,45 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone, date
 from typing import Dict, List, Optional, Tuple
 from collections import namedtuple
-
-# External dependencies
 try:
     import pygame
     PYGAME_AVAILABLE = True
 except ImportError:
     PYGAME_AVAILABLE = False
     print("[daemon] pygame not available - audio disabled")
-
 try:
     import requests
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
     print("[daemon] requests not available - Oura API disabled")
-
 try:
     from pynput import mouse, keyboard as pynput_keyboard
     PYNPUT_AVAILABLE = True
 except ImportError:
     PYNPUT_AVAILABLE = False
     print("[daemon] pynput not available - input monitoring disabled")
-
-
-# ==============================================================================
-# Path Resolution
-# ==============================================================================
 def get_root_path() -> Path:
-    """Get project root path (parent of core/)"""
     return Path(__file__).parent.parent.resolve()
-
 ROOT_PATH = get_root_path()
-
 if str(ROOT_PATH) not in sys.path:
     sys.path.insert(0, str(ROOT_PATH))
-
-# Core module imports (from refactored __init__.py)
+from core.types import (
+    __version__,
+    JST,
+    now_jst,
+    Command,
+    CommandType,
+    CommandQueue,
+    safe_read_json,
+    safe_write_json,
+    COMMAND_QUEUE_FILENAME,
+)
 try:
     from core import LifeOSDatabase, DATABASE_AVAILABLE
 except ImportError:
     from core.database import LifeOSDatabase
     DATABASE_AVAILABLE = True
-
 try:
     from core import BioEngine, ENGINE_AVAILABLE
 except ImportError:
@@ -79,49 +68,25 @@ try:
 except ImportError:
     SHADOW_HR_AVAILABLE = False
     ShadowHeartrate = None
-
-
-# ==============================================================================
-# Timezone
-# ==============================================================================
-JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
-
-
-# ==============================================================================
-# Constants
-# ==============================================================================
-POLLING_INTERVAL_SECONDS = 300  # 5 minutes
-OURA_DAY_BOUNDARY_HOUR = 4      # Oura day boundary at 4 AM
-LISTENER_RESTART_DELAY = 5.0    # Delay before restarting failed listeners
-MAX_LISTENER_RESTARTS = 10      # Maximum listener restart attempts
-
-
-# ==============================================================================
-# Data Structures
-# ==============================================================================
+POLLING_INTERVAL_SECONDS = 300
+OURA_DAY_BOUNDARY_HOUR = 4
+LISTENER_RESTART_DELAY = 5.0
+MAX_LISTENER_RESTARTS = 10
 HeartRatePoint = namedtuple('HeartRatePoint', ['timestamp', 'bpm', 'source'])
 NapSegment = namedtuple('NapSegment', ['start', 'end', 'avg_bpm', 'duration_minutes'])
-
-
-# ==============================================================================
-# Path Helpers
-# ==============================================================================
 def get_config_path() -> Path:
     return ROOT_PATH / "config.json"
-
 def get_state_path() -> Path:
     return ROOT_PATH / "logs" / "daemon_state.json"
-
+def get_command_queue_path() -> Path:
+    return ROOT_PATH / "logs" / COMMAND_QUEUE_FILENAME
 def get_log_dir() -> Path:
     return ROOT_PATH / "logs"
-
 def get_pid_path() -> Path:
     return ROOT_PATH / "logs" / "daemon.pid"
-
 def get_voice_assets_path() -> Path:
     return ROOT_PATH / "Data" / "sounds"
-
 def get_db_path() -> Path:
     return ROOT_PATH / "Data" / "life_os.db"
 
@@ -186,92 +151,7 @@ def is_daemon_running() -> Tuple[bool, Optional[int]]:
         return False, None
 
 
-# ==============================================================================
-# Robust JSON Operations (Retry Logic)
-# ==============================================================================
-def safe_read_json(path: Path, default: Dict = None, logger: logging.Logger = None, 
-                   max_retries: int = 3) -> Dict:
-    """
-    Read JSON with retry logic for permission/access errors.
-    """
-    if default is None:
-        default = {}
-    
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            if not path.exists():
-                return default.copy()
-            
-            content = path.read_text(encoding='utf-8').strip()
-            if not content:
-                if logger:
-                    logger.warning(f"Empty JSON file: {path}")
-                return default.copy()
-            
-            return json.loads(content)
-        
-        except json.JSONDecodeError as e:
-            if logger:
-                logger.error(f"JSON decode error in {path}: {e}")
-            return default.copy()
-        
-        except (PermissionError, OSError) as e:
-            last_error = e
-            if logger and attempt < max_retries - 1:
-                logger.debug(f"Retry {attempt + 1}/{max_retries} reading {path}: {e}")
-            time.sleep(0.1)
-        
-        except Exception as e:
-            if logger:
-                logger.error(f"Failed to read {path}: {e}")
-            return default.copy()
-    
-    if logger:
-        logger.error(f"All retries failed for {path}: {last_error}")
-    return default.copy()
-
-
-def safe_write_json(path: Path, data: Dict, logger: logging.Logger = None, 
-                    max_retries: int = 3) -> bool:
-    """
-    Write JSON with retry logic and atomic write via temp file.
-    """
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Atomic write: write to temp file then rename
-            temp_path = path.with_suffix('.tmp')
-            temp_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), 
-                encoding='utf-8'
-            )
-            temp_path.replace(path)
-            return True
-        
-        except (PermissionError, OSError) as e:
-            last_error = e
-            if logger and attempt < max_retries - 1:
-                logger.debug(f"Retry {attempt + 1}/{max_retries} writing {path}: {e}")
-            time.sleep(0.1)
-        
-        except Exception as e:
-            if logger:
-                logger.error(f"Failed to write {path}: {e}")
-            return False
-    
-    if logger:
-        logger.error(f"All retries failed for {path}: {last_error}")
-    return False
-
-
-# ==============================================================================
-# 4AM Day Boundary Logic
-# ==============================================================================
 def get_oura_effective_date() -> date:
-    """Get Oura-effective date (before 4AM = previous day)"""
     now = datetime.now()
     if now.hour < OURA_DAY_BOUNDARY_HOUR:
         return (now - timedelta(days=1)).date()
@@ -279,7 +159,7 @@ def get_oura_effective_date() -> date:
 
 
 def is_data_from_effective_today(day_str: str) -> bool:
-    """v5.3.1: Tolerant date validation - accept today or yesterday"""
+    """Tolerant date validation - accept today or yesterday"""
     if not day_str:
         return False
     try:
@@ -404,7 +284,7 @@ class ActivityMonitor:
 # ==============================================================================
 class InputTelemetry:
     """
-    v4.3.0: Robust input telemetry with auto-restart capability.
+    Robust input telemetry with auto-restart capability.
     
     Key improvements:
     - Listener auto-restart on failure
@@ -446,7 +326,7 @@ class InputTelemetry:
             try:
                 db_path = get_root_path() / "Data"
                 self._telemetry_engine = BioEngine(db_path=db_path)
-                self.logger.info("v4.3.0: BioEngine initialized for Telemetry FP")
+                self.logger.info("BioEngine initialized for Telemetry FP")
             except Exception as e:
                 self.logger.warning(f"BioEngine init failed: {e}")
         
@@ -469,48 +349,24 @@ class InputTelemetry:
         # Timing
         self._last_aggregate_time = datetime.now()
         self._last_state_update_time = datetime.now()
-        
-        # Current state (published to daemon_state.json)
-        self.current_state = {
-            'state_label': 'IDLE',
-            'cognitive_friction': 'CLEAR',
-            'apm': 0,
-            'mouse_pixels': 0,
-            'correction_rate': 0.0,
-            'fp_multiplier': 1.0,
-            'mouse_pixels_cumulative': 0.0,
-            'backspace_count_cumulative': 0,
-            'key_count_cumulative': 0,
-            'phantom_recovery': 0.0,
-            'phantom_recovery_sum': 0.0,
-            'scroll_steps_cumulative': 0,
-            'effective_fp': None
-        }
-        
-        # Phantom Recovery tracking
         self._idle_start: Optional[datetime] = None
         self._phantom_recovery_accumulated = 0.0
         self._phantom_recovery_sum = 0.0
-        
-        # Listener management
         self._running = True
         self._mouse_listener = None
         self._keyboard_listener = None
         self._listener_restart_count = 0
         self._listener_lock = threading.Lock()
-        
-        # Start listeners
+        initial_brain = self._calculate_full_brain_state()
+        self.current_state = {'state_label': 'IDLE', 'cognitive_friction': 'CLEAR', 'apm': 0, 'mouse_pixels': 0, 'correction_rate': 0.0, 'fp_multiplier': 1.0, 'mouse_pixels_cumulative': 0.0, 'backspace_count_cumulative': 0, 'key_count_cumulative': 0, 'phantom_recovery': 0.0, 'phantom_recovery_sum': 0.0, 'scroll_steps_cumulative': 0, 'effective_fp': initial_brain.get('effective_fp', 75.0), 'current_load': initial_brain.get('current_load', 0.0), 'estimated_readiness': initial_brain.get('estimated_readiness', 75.0), 'activity_state': initial_brain.get('activity_state', 'IDLE'), 'boost_fp': initial_brain.get('boost_fp', 0.0), 'base_fp': initial_brain.get('base_fp', 75.0), 'debt': initial_brain.get('debt', 0.0), 'continuous_work_hours': initial_brain.get('continuous_work_hours', 0.0), 'status_code': initial_brain.get('status_code', 'INITIALIZING'), 'status_sub': initial_brain.get('status_sub', ''), 'recommended_break_iso': initial_brain.get('recommended_break_iso'), 'exhaustion_iso': initial_brain.get('exhaustion_iso'), 'recovery_ceiling': initial_brain.get('recovery_ceiling', 100.0), 'stress_index': initial_brain.get('stress_index', 0.0), 'recovery_efficiency': initial_brain.get('recovery_efficiency', 1.0), 'decay_multiplier': initial_brain.get('decay_multiplier', 1.0), 'hours_since_wake': initial_brain.get('hours_since_wake', 0.0), 'boost_efficiency': initial_brain.get('boost_efficiency', 1.0), 'correction_factor': initial_brain.get('correction_factor', 1.0), 'current_hr': initial_brain.get('current_hr'), 'hr_stress_factor': initial_brain.get('hr_stress_factor', 1.0), 'current_mouse_speed': initial_brain.get('current_mouse_speed', 0.0), 'recent_correction_rate': initial_brain.get('recent_correction_rate', 0.0), 'is_shisha_active': initial_brain.get('is_shisha_active', False), 'prediction': initial_brain.get('prediction', {'continue': [], 'rest': []})}
         self._start_listeners()
-        
-        # Start aggregation thread
         self._aggregate_thread = threading.Thread(
             target=self._aggregate_loop, 
             daemon=True,
             name="Telemetry-Aggregator"
         )
         self._aggregate_thread.start()
-        
-        self.logger.info("v4.3.0 InputTelemetry initialized (Robust + Auto-Restart)")
+        self.logger.info("InputTelemetry initialized (Robust + Auto-Restart)")
     
     def _start_listeners(self):
         """Start pynput listeners with error handling"""
@@ -702,200 +558,96 @@ class InputTelemetry:
                 recent_apm = self._key_count + self._click_count
                 recent_mouse = int(self._mouse_distance)
                 recent_scroll = self._scroll_steps
-                
-                # Correction rate
-                correction_rate = 0.0
-                if self._key_count > 0:
-                    correction_rate = self._backspace_count / self._key_count
-            
-            # Cognitive friction
-            if correction_rate < self.CORRECTION_THRESHOLDS['CLEAR']:
-                cognitive_friction = 'CLEAR'
-            elif correction_rate < self.CORRECTION_THRESHOLDS['HESITATION']:
-                cognitive_friction = 'HESITATION'
-            else:
-                cognitive_friction = 'GRIDLOCK'
-            
-            # State determination
-            state_label, fp_multiplier = self._determine_state_with_scroll(
-                recent_apm, recent_mouse, recent_scroll
-            )
-            
-            # Phantom recovery
+                correction_rate = self._backspace_count / self._key_count if self._key_count > 0 else 0.0
+                current_mouse_speed = recent_mouse
+                recent_correction_rate = correction_rate
+            cognitive_friction = 'CLEAR' if correction_rate < self.CORRECTION_THRESHOLDS['CLEAR'] else ('HESITATION' if correction_rate < self.CORRECTION_THRESHOLDS['HESITATION'] else 'GRIDLOCK')
+            state_label, fp_multiplier = self._determine_state_with_scroll(recent_apm, recent_mouse, recent_scroll)
             self._handle_phantom_recovery(state_label)
-            
-            # Update state dict
-            self.current_state = {
-                'state_label': state_label,
-                'cognitive_friction': cognitive_friction,
-                'apm': recent_apm,
-                'mouse_pixels': recent_mouse,
-                'correction_rate': round(correction_rate, 4),
-                'fp_multiplier': fp_multiplier,
-                'mouse_pixels_cumulative': round(self._session_mouse_total, 1),
-                'backspace_count_cumulative': self._session_backspace_total,
-                'key_count_cumulative': self._session_key_total,
-                'phantom_recovery': round(self._phantom_recovery_accumulated, 2),
-                'phantom_recovery_sum': round(self._phantom_recovery_sum, 2),
-                'scroll_steps_cumulative': self._session_scroll_total,
-                'effective_fp': self.current_state.get('effective_fp')
-            }
-            
+            prev = self.current_state
+            self.current_state = {'state_label': state_label, 'cognitive_friction': cognitive_friction, 'apm': recent_apm, 'mouse_pixels': recent_mouse, 'correction_rate': round(correction_rate, 4), 'fp_multiplier': fp_multiplier, 'mouse_pixels_cumulative': round(self._session_mouse_total, 1), 'backspace_count_cumulative': self._session_backspace_total, 'key_count_cumulative': self._session_key_total, 'phantom_recovery': round(self._phantom_recovery_accumulated, 2), 'phantom_recovery_sum': round(self._phantom_recovery_sum, 2), 'scroll_steps_cumulative': self._session_scroll_total, 'effective_fp': prev.get('effective_fp', 75.0), 'current_load': prev.get('current_load', 0.0), 'estimated_readiness': prev.get('estimated_readiness', 75.0), 'activity_state': prev.get('activity_state', 'IDLE'), 'boost_fp': prev.get('boost_fp', 0.0), 'base_fp': prev.get('base_fp', 75.0), 'debt': prev.get('debt', 0.0), 'continuous_work_hours': prev.get('continuous_work_hours', 0.0), 'status_code': prev.get('status_code', 'INITIALIZING'), 'status_sub': prev.get('status_sub', ''), 'recommended_break_iso': prev.get('recommended_break_iso'), 'exhaustion_iso': prev.get('exhaustion_iso'), 'recovery_ceiling': prev.get('recovery_ceiling', 100.0), 'stress_index': prev.get('stress_index', 0.0), 'recovery_efficiency': prev.get('recovery_efficiency', 1.0), 'decay_multiplier': prev.get('decay_multiplier', 1.0), 'hours_since_wake': prev.get('hours_since_wake', 0.0), 'boost_efficiency': prev.get('boost_efficiency', 1.0), 'correction_factor': prev.get('correction_factor', 1.0), 'current_hr': prev.get('current_hr'), 'hr_stress_factor': prev.get('hr_stress_factor', 1.0), 'current_mouse_speed': current_mouse_speed, 'recent_correction_rate': recent_correction_rate, 'is_shisha_active': prev.get('is_shisha_active', False), 'prediction': prev.get('prediction', {'continue': [], 'rest': []})}
         except Exception as e:
             self.logger.debug(f"State update error: {e}")
     
     def _perform_aggregation(self):
         """Perform 60-second aggregation and persist to DB"""
         try:
-            # Snapshot and reset counters atomically
             with self._counter_lock:
                 key_count = self._key_count
                 click_count = self._click_count
                 backspace_count = self._backspace_count
                 mouse_distance = int(self._mouse_distance)
                 scroll_steps = self._scroll_steps
-                
                 self._key_count = 0
                 self._click_count = 0
                 self._backspace_count = 0
                 self._mouse_distance = 0.0
                 self._scroll_steps = 0
-            
-            # Calculate metrics
             apm = key_count + click_count
-            
-            correction_rate = 0.0
-            if key_count > 0:
-                correction_rate = backspace_count / key_count
-            
-            # Cognitive friction
-            if correction_rate < self.CORRECTION_THRESHOLDS['CLEAR']:
-                cognitive_friction = 'CLEAR'
-            elif correction_rate < self.CORRECTION_THRESHOLDS['HESITATION']:
-                cognitive_friction = 'HESITATION'
-            else:
-                cognitive_friction = 'GRIDLOCK'
-            
-            # State
+            correction_rate = backspace_count / key_count if key_count > 0 else 0.0
+            cognitive_friction = 'CLEAR' if correction_rate < self.CORRECTION_THRESHOLDS['CLEAR'] else ('HESITATION' if correction_rate < self.CORRECTION_THRESHOLDS['HESITATION'] else 'GRIDLOCK')
             state_label, fp_multiplier = self._determine_state(apm, mouse_distance)
-            
-            # Phantom recovery
             self._handle_phantom_recovery(state_label)
-            
-            # Calculate FP via BioEngine
-            effective_fp = self._calculate_fp_via_engine()
-            
-            # Update current state
-            self.current_state = {
-                'state_label': state_label,
-                'cognitive_friction': cognitive_friction,
-                'apm': apm,
-                'mouse_pixels': mouse_distance,
-                'correction_rate': round(correction_rate, 4),
-                'fp_multiplier': fp_multiplier,
-                'phantom_recovery': round(self._phantom_recovery_accumulated, 2),
-                'phantom_recovery_sum': round(self._phantom_recovery_sum, 2),
-                'mouse_pixels_cumulative': round(self._session_mouse_total, 1),
-                'backspace_count_cumulative': self._session_backspace_total,
-                'key_count_cumulative': self._session_key_total,
-                'scroll_steps_cumulative': self._session_scroll_total,
-                'effective_fp': effective_fp
-            }
-            
-            # Persist to DB
+            full_brain = self._calculate_full_brain_state()
+            effective_fp = full_brain.get('effective_fp')
+            self.current_state = {'state_label': state_label, 'cognitive_friction': cognitive_friction, 'apm': apm, 'mouse_pixels': mouse_distance, 'correction_rate': round(correction_rate, 4), 'fp_multiplier': fp_multiplier, 'phantom_recovery': round(self._phantom_recovery_accumulated, 2), 'phantom_recovery_sum': round(self._phantom_recovery_sum, 2), 'mouse_pixels_cumulative': round(self._session_mouse_total, 1), 'backspace_count_cumulative': self._session_backspace_total, 'key_count_cumulative': self._session_key_total, 'scroll_steps_cumulative': self._session_scroll_total, 'effective_fp': effective_fp, 'current_load': full_brain.get('current_load', 0.0), 'estimated_readiness': full_brain.get('estimated_readiness', 75.0), 'activity_state': full_brain.get('activity_state', 'IDLE'), 'boost_fp': full_brain.get('boost_fp', 0.0), 'base_fp': full_brain.get('base_fp', 75.0), 'debt': full_brain.get('debt', 0.0), 'continuous_work_hours': full_brain.get('continuous_work_hours', 0.0), 'status_code': full_brain.get('status_code', 'INITIALIZING'), 'status_sub': full_brain.get('status_sub', ''), 'recommended_break_iso': full_brain.get('recommended_break_iso'), 'exhaustion_iso': full_brain.get('exhaustion_iso'), 'recovery_ceiling': full_brain.get('recovery_ceiling', 100.0), 'stress_index': full_brain.get('stress_index', 0.0), 'recovery_efficiency': full_brain.get('recovery_efficiency', 1.0), 'decay_multiplier': full_brain.get('decay_multiplier', 1.0), 'hours_since_wake': full_brain.get('hours_since_wake', 0.0), 'boost_efficiency': full_brain.get('boost_efficiency', 1.0), 'correction_factor': full_brain.get('correction_factor', 1.0), 'current_hr': full_brain.get('current_hr'), 'hr_stress_factor': full_brain.get('hr_stress_factor', 1.0), 'current_mouse_speed': full_brain.get('current_mouse_speed', 0.0), 'recent_correction_rate': full_brain.get('recent_correction_rate', 0.0), 'is_shisha_active': full_brain.get('is_shisha_active', False), 'prediction': full_brain.get('prediction', {'continue': [], 'rest': []})}
             if self.db:
                 try:
-                    self.db.log_tactile_data({
-                        'timestamp': datetime.now().isoformat(),
-                        'apm': apm,
-                        'mouse_pixels': mouse_distance,
-                        'correction_rate': correction_rate,
-                        'state_label': state_label,
-                        'cognitive_friction': cognitive_friction,
-                        'key_count': key_count,
-                        'click_count': click_count,
-                        'backspace_count': backspace_count,
-                        'effective_fp': effective_fp
-                    })
+                    self.db.log_tactile_data({'timestamp': datetime.now().isoformat(), 'apm': apm, 'mouse_pixels': mouse_distance, 'correction_rate': correction_rate, 'state_label': state_label, 'cognitive_friction': cognitive_friction, 'key_count': key_count, 'click_count': click_count, 'backspace_count': backspace_count, 'effective_fp': effective_fp})
                 except Exception as db_err:
                     self.logger.warning(f"DB log failed: {db_err}")
-            
             fp_str = f"{effective_fp:.1f}" if effective_fp is not None else "N/A"
-            self.logger.info(
-                f"Tactile: APM={apm}, Mouse={mouse_distance}px, "
-                f"State={state_label}, FP={fp_str}"
-            )
-        
+            self.logger.info(f"Tactile: APM={apm}, Mouse={mouse_distance}px, State={state_label}, FP={fp_str}")
         except Exception as e:
             self.logger.error(f"Aggregation failed: {e}")
             traceback.print_exc()
     
     def _calculate_fp_via_engine(self) -> Optional[float]:
-        """Calculate FP using BioEngine"""
-        effective_fp = None
-        
-        if self._telemetry_engine is not None:
-            try:
-                # Load state for Oura data
-                state_path = get_state_path()
-                state_data = safe_read_json(state_path, {}, self.logger)
-                oura_details = state_data.get('oura_details', {})
-                readiness = state_data.get('last_oura_score', 75)
-                
-                # Configure BioEngine
-                self._telemetry_engine.set_readiness(readiness)
-                
-                sleep_score = oura_details.get('sleep_score')
-                if sleep_score:
-                    self._telemetry_engine.set_sleep_score(sleep_score)
-                
-                rhr = oura_details.get('true_rhr')
-                if rhr:
-                    self._telemetry_engine.set_baseline_hr(rhr)
-                
-                # Get HR data
-                hr_stream = oura_details.get('hr_stream', [])
-                current_hr = oura_details.get('current_hr')
-                total_nap_minutes = oura_details.get('total_nap_minutes', 0.0) or 0.0
-                is_shisha_active = state_data.get('is_shisha_active', False)
-                
-                # Update BioEngine
-                self._telemetry_engine.update(
-                    apm=self.current_state.get('apm', 0),
-                    cumulative_mouse_pixels=self._session_mouse_total,
-                    cumulative_backspace_count=self._session_backspace_total,
-                    cumulative_key_count=self._session_key_total,
-                    cumulative_scroll_steps=self._session_scroll_total,
-                    phantom_recovery_sum=self._phantom_recovery_sum,
-                    hr=current_hr,
-                    hr_stream=hr_stream,
-                    total_nap_minutes=total_nap_minutes,
-                    dt_seconds=60.0,
-                    is_shisha_active=is_shisha_active,
-                    is_hr_estimated=False
-                )
-                
-                metrics = self._telemetry_engine.get_health_metrics()
-                effective_fp = metrics.get('effective_fp')
-                
-            except Exception as e:
-                self.logger.debug(f"BioEngine FP calc error: {e}")
-        
-        # Fallback
-        if effective_fp is None:
-            try:
-                state_path = get_state_path()
-                state_data = safe_read_json(state_path, {}, self.logger)
-                brain_state = state_data.get('brain_state', {})
-                effective_fp = brain_state.get('effective_fp')
-                
-                if effective_fp is None:
-                    readiness = state_data.get('last_oura_score', 75)
-                    effective_fp = float(readiness) if readiness else 75.0
-            except Exception:
-                effective_fp = 75.0
-        
-        return effective_fp
+        result = self._calculate_full_brain_state()
+        return result.get('effective_fp') if result else None
+    def _calculate_full_brain_state(self) -> Dict:
+        """Calculate full brain state using BioEngine (DB-centric SSOT)"""
+        result = {'effective_fp': 75.0, 'current_load': 0.0, 'estimated_readiness': 75.0, 'activity_state': 'IDLE', 'boost_fp': 0.0, 'base_fp': 75.0, 'debt': 0.0, 'continuous_work_hours': 0.0, 'status_code': 'INITIALIZING', 'status_sub': '', 'recommended_break_iso': None, 'exhaustion_iso': None, 'recovery_ceiling': 100.0, 'stress_index': 0.0, 'recovery_efficiency': 1.0, 'decay_multiplier': 1.0, 'hours_since_wake': 0.0, 'boost_efficiency': 1.0, 'correction_factor': 1.0, 'current_hr': None, 'hr_stress_factor': 1.0, 'prediction': {'continue': [], 'rest': []}}
+        if self._telemetry_engine is None:
+            return result
+        try:
+            state_data = self.db.get_combined_state() if self.db else {}
+            oura_details = state_data.get('oura_details', {})
+            readiness = state_data.get('last_oura_score') or 75
+            self._telemetry_engine.set_readiness(readiness)
+            sleep_score = oura_details.get('sleep_score')
+            if sleep_score:
+                self._telemetry_engine.set_sleep_score(sleep_score)
+            rhr = oura_details.get('true_rhr')
+            if rhr:
+                self._telemetry_engine.set_baseline_hr(rhr)
+            wake_anchor_iso = oura_details.get('wake_anchor_iso')
+            if wake_anchor_iso:
+                try:
+                    wake_time = datetime.fromisoformat(wake_anchor_iso)
+                    if wake_time.tzinfo is None:
+                        wake_time = wake_time.replace(tzinfo=JST)
+                    self._telemetry_engine.set_wake_time(wake_time)
+                except:
+                    pass
+            main_sleep = oura_details.get('main_sleep_seconds')
+            if main_sleep:
+                self._telemetry_engine.set_main_sleep_seconds(main_sleep)
+            hr_stream = oura_details.get('hr_stream', [])
+            current_hr = oura_details.get('current_hr')
+            total_nap_minutes = oura_details.get('total_nap_minutes', 0.0) or 0.0
+            is_shisha_active = state_data.get('is_shisha_active', False)
+            self._telemetry_engine.update(apm=self.current_state.get('apm', 0), cumulative_mouse_pixels=self._session_mouse_total, cumulative_backspace_count=self._session_backspace_total, cumulative_key_count=self._session_key_total, cumulative_scroll_steps=self._session_scroll_total, phantom_recovery_sum=self._phantom_recovery_sum, hr=current_hr, hr_stream=hr_stream, total_nap_minutes=total_nap_minutes, dt_seconds=60.0, is_shisha_active=is_shisha_active, is_hr_estimated=False)
+            metrics = self._telemetry_engine.get_health_metrics()
+            status_code, status_sub = self._telemetry_engine.get_status_code()
+            recommended_break = self._telemetry_engine.get_recommended_break_time()
+            exhaustion_time = self._telemetry_engine.get_exhaustion_time()
+            prediction_raw = self._telemetry_engine.predict_trajectory(240)
+            prediction = {'continue': [{'minutes': i * 5, 'fp': p.fp} for i, p in enumerate(prediction_raw.get('continue', []))], 'rest': [{'minutes': i * 5, 'fp': p.fp} for i, p in enumerate(prediction_raw.get('rest', []))]}
+            result.update({'effective_fp': metrics.get('effective_fp', 75.0), 'current_load': metrics.get('current_load', 0.0), 'estimated_readiness': metrics.get('estimated_readiness', 75.0), 'activity_state': metrics.get('activity_state', 'IDLE'), 'boost_fp': metrics.get('boost_fp', 0.0), 'base_fp': metrics.get('base_fp', 75.0), 'debt': metrics.get('debt', 0.0), 'continuous_work_hours': metrics.get('continuous_work_hours', 0.0), 'status_code': status_code, 'status_sub': status_sub, 'recommended_break_iso': recommended_break.isoformat() if recommended_break else None, 'exhaustion_iso': exhaustion_time.isoformat() if exhaustion_time else None, 'recovery_ceiling': metrics.get('recovery_ceiling', 100.0), 'stress_index': metrics.get('stress_index', 0.0), 'recovery_efficiency': metrics.get('recovery_efficiency', 1.0), 'decay_multiplier': metrics.get('decay_multiplier', 1.0), 'hours_since_wake': metrics.get('hours_since_wake', 0.0), 'boost_efficiency': metrics.get('boost_efficiency', 1.0), 'correction_factor': metrics.get('correction_factor', 1.0), 'current_hr': metrics.get('current_hr'), 'hr_stress_factor': metrics.get('hr_stress_factor', 1.0), 'current_mouse_speed': metrics.get('current_mouse_speed', 0.0), 'recent_correction_rate': metrics.get('recent_correction_rate', 0.0), 'is_shisha_active': is_shisha_active, 'prediction': prediction})
+        except Exception as e:
+            self.logger.debug(f"BioEngine full calc error: {e}")
+        return result
     
     def _determine_state(self, apm: int, mouse_distance: int) -> Tuple[str, float]:
         """Determine activity state"""
@@ -1022,7 +774,7 @@ class OuraAPIClient:
             return None
     
     def get_daily_readiness(self) -> Tuple[Optional[int], bool]:
-        """v5.3.1: Get readiness score with tolerant date logic"""
+        """Get readiness score with tolerant date logic"""
         try:
             end_date = datetime.now().strftime('%Y-%m-%d')
             start_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
@@ -1061,7 +813,7 @@ class OuraAPIClient:
         try:
             now_utc = datetime.now(UTC)
             end_datetime = now_utc
-            start_datetime = now_utc - timedelta(days=7)
+            start_datetime = now_utc - timedelta(days=30)
             
             params_dt = {
                 "start_datetime": start_datetime.isoformat(),
@@ -1082,8 +834,7 @@ class OuraAPIClient:
             for entry in hr_data['data']:
                 ts = self.parse_utc_timestamp(entry.get('timestamp'))
                 bpm = entry.get('bpm')
-                source = 'oura'
-                
+                source = entry.get('source', 'awake')
                 if ts and bpm:
                     hr_points.append(HeartRatePoint(ts, bpm, source))
                     all_bpms.append(bpm)
@@ -1137,32 +888,50 @@ class OuraAPIClient:
             return result
     
     def _detect_wake_anchor(self, hr_points: List[HeartRatePoint]) -> Optional[datetime]:
-        """Detect wake time from HR data"""
+        """Detect wake time from HR data - prioritize HR stream detection"""
         try:
+            now = datetime.now(UTC)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_noon = today_start - timedelta(hours=12)
+            recent_hr = [p for p in hr_points if p.timestamp > yesterday_noon]
+            if not recent_hr:
+                recent_hr = hr_points[-500:] if len(hr_points) > 500 else hr_points
+            rest_periods = []
+            current_rest_start = None
+            for i, point in enumerate(recent_hr):
+                if point.source == 'rest':
+                    if current_rest_start is None:
+                        current_rest_start = point.timestamp
+                else:
+                    if current_rest_start is not None:
+                        rest_periods.append({'start': current_rest_start, 'end': point.timestamp, 'duration': (point.timestamp - current_rest_start).total_seconds()})
+                        current_rest_start = None
+            if current_rest_start is not None and recent_hr:
+                rest_periods.append({'start': current_rest_start, 'end': recent_hr[-1].timestamp, 'duration': (recent_hr[-1].timestamp - current_rest_start).total_seconds()})
+            main_sleep_candidates = [r for r in rest_periods if r['duration'] >= 3600]
+            if main_sleep_candidates:
+                main_sleep = max(main_sleep_candidates, key=lambda r: r['duration'])
+                wake_time = main_sleep['end']
+                if wake_time.tzinfo is None:
+                    wake_time = wake_time.replace(tzinfo=UTC)
+                wake_jst = wake_time.astimezone(JST)
+                self.logger.info(f"Wake anchor detected from HR stream: {wake_jst.strftime('%Y-%m-%d %H:%M')}")
+                return wake_time
             end_date = datetime.now().strftime('%Y-%m-%d')
             start_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
-            
-            sleep_data = self._make_request("daily_sleep", {
-                "start_date": start_date,
-                "end_date": end_date
-            })
-            
+            sleep_data = self._make_request("daily_sleep", {"start_date": start_date, "end_date": end_date})
             if sleep_data and 'data' in sleep_data and len(sleep_data['data']) > 0:
-                latest = sleep_data['data'][-1]
+                sorted_data = sorted(sleep_data['data'], key=lambda x: x.get('day', ''), reverse=True)
+                latest = sorted_data[0]
                 bedtime_end = latest.get('bedtime_end')
                 if bedtime_end:
-                    return self.parse_utc_timestamp(bedtime_end)
-            
-            # Fallback: detect rest->awake transition
-            for i in range(1, len(hr_points)):
-                prev = hr_points[i - 1]
-                curr = hr_points[i]
-                if prev.source == 'rest' and curr.source != 'rest':
-                    return curr.timestamp
-            
+                    api_wake = self.parse_utc_timestamp(bedtime_end)
+                    if api_wake and api_wake > yesterday_noon:
+                        self.logger.info(f"Wake anchor from API: {api_wake}")
+                        return api_wake
             return None
-        
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"Wake anchor detection failed: {e}")
             return None
     
     def _calculate_main_sleep(self, hr_points: List[HeartRatePoint], 
@@ -1427,22 +1196,42 @@ class OuraAPIClient:
             if stream['wake_anchor']:
                 details['wake_anchor_iso'] = stream['wake_anchor'].isoformat()
             
-            hr_stream = stream['hr_stream'][-200:] if stream['hr_stream'] else []
-            details['hr_stream'] = [
-                {
-                    'timestamp': p.timestamp.isoformat(),
-                    'bpm': p.bpm,
-                    'source': p.source
-                }
-                for p in hr_stream
-            ]
+            full_hr_stream = stream['hr_stream'] if stream['hr_stream'] else []
+            details['hr_stream_full'] = [{'timestamp': p.timestamp.isoformat(), 'bpm': p.bpm, 'source': p.source} for p in full_hr_stream]
+            details['hr_stream'] = [{'timestamp': p.timestamp.isoformat(), 'bpm': p.bpm, 'source': p.source} for p in full_hr_stream[-200:]]
             
             return (details, is_today)
-        
         except Exception as e:
             self.logger.error(f"get_detailed_data failed: {e}")
             traceback.print_exc()
             return (details, False)
+    def fetch_historical_sleep(self, days: int = 30) -> List[Dict]:
+        """Fetch historical sleep data for sleep debt calculation"""
+        result = []
+        try:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            params = {"start_date": start_date, "end_date": end_date}
+            s_data = self._make_request("daily_sleep", params)
+            r_data = self._make_request("daily_readiness", params)
+            readiness_map = {}
+            if r_data and r_data.get('data'):
+                for r in r_data['data']:
+                    day = r.get('day')
+                    if day:
+                        readiness_map[day] = r.get('score')
+            if s_data and s_data.get('data'):
+                for record in s_data['data']:
+                    day = record.get('day')
+                    if not day:
+                        continue
+                    contributors = record.get('contributors', {})
+                    result.append({'date': day, 'sleep_score': record.get('score'), 'main_sleep_seconds': record.get('total_sleep_duration'), 'readiness_score': readiness_map.get(day), 'sleep_efficiency': contributors.get('efficiency'), 'restfulness': contributors.get('restfulness'), 'deep_sleep': contributors.get('deep_sleep'), 'rem_sleep': contributors.get('rem_sleep')})
+            self.logger.info(f"Fetched {len(result)} days of historical sleep data")
+            return result
+        except Exception as e:
+            self.logger.error(f"fetch_historical_sleep failed: {e}")
+            return result
 
 
 # ==============================================================================
@@ -1550,81 +1339,51 @@ class BioFeedbackScheduler:
 # State Manager
 # ==============================================================================
 class StateManager:
-    """Manage daemon_state.json with thread safety"""
-    DEFAULT_STATE = {
-        'daemon_running': False,
-        'daemon_pid': None,
-        'gui_running': False,
-        'is_muted': False,
-        'last_oura_score': None,
-        'oura_details': {},
-        'current_mode': 'mid',
-        'next_break_timestamp': None,
-        'is_shisha_active': False,
-        'user_present': True,
-        'idle_seconds': 0,
-        'momentum_minutes': 0,
-        'is_data_effective_today': True,
-        'last_activity_iso': None,
-        'command_queue': [],
-        'current_shisha_session_id': None,
-        'brain_state': {
-            'state_label': 'IDLE',
-            'cognitive_friction': 'CLEAR',
-            'apm': 0,
-            'mouse_pixels': 0,
-            'correction_rate': 0.0,
-            'fp_multiplier': 1.0,
-            'mouse_pixels_cumulative': 0.0,
-            'backspace_count_cumulative': 0,
-            'key_count_cumulative': 0,
-            'phantom_recovery': 0.0,
-            'phantom_recovery_sum': 0.0,
-            'scroll_steps_cumulative': 0,
-            'effective_fp': None,
-            'estimated_hr': None,
-            'is_hr_estimated': False
-        }
-    }
-    
-    def __init__(self, file: Path, logger: logging.Logger):
-        self.file = file
+    """v6.1.0: DB-centric State Manager (SSOT)"""
+    def __init__(self, db: 'LifeOSDatabase', logger: logging.Logger):
+        self.db = db
         self.logger = logger
-        self.state = self.DEFAULT_STATE.copy()
         self._lock = threading.Lock()
-    
+        self._cache = {}
     def load(self):
-        """Load state from file"""
+        """Load state from DB"""
         with self._lock:
-            loaded = safe_read_json(self.file, self.DEFAULT_STATE, self.logger)
-            self.state.update(loaded)
-    
+            self._cache = self.db.get_daemon_state()
     def save(self):
-        """Save state to file"""
-        with self._lock:
-            safe_write_json(self.file, self.state, self.logger)
-    
+        """Compatibility - no-op"""
+        pass
     def update(self, **kwargs):
-        """Update state and persist"""
+        """Update daemon_state in DB (filters out complex objects)"""
         with self._lock:
-            self.state.update(kwargs)
-        self.save()
-    
+            oura_details = kwargs.pop('oura_details', None)
+            if oura_details:
+                self.db.update_oura_cache(oura_details)
+            db_kwargs = {k: v for k, v in kwargs.items() if k in ('daemon_running', 'daemon_pid', 'gui_running', 'is_muted', 'is_shisha_active', 'is_sleeping', 'user_present', 'idle_seconds', 'momentum_minutes', 'current_mode', 'last_oura_score', 'is_data_effective_today', 'current_shisha_session_id')}
+            if db_kwargs:
+                self.db.update_daemon_state(**db_kwargs)
+            self._cache.update(kwargs)
+            if oura_details:
+                self._cache['oura_details'] = oura_details
     def update_brain_state(self, brain_state: Dict):
-        """Update brain_state specifically (guaranteed persistence)"""
+        """Save brain metrics to DB"""
+        self.db.save_brain_metrics(brain_state)
         with self._lock:
-            if 'brain_state' not in self.state:
-                self.state['brain_state'] = {}
-            self.state['brain_state'].update(brain_state)
-        self.save()
+            self._cache['brain_state'] = brain_state
+    def update_oura_cache(self, oura_details: Dict):
+        """Save Oura cache to DB"""
+        self.db.update_oura_cache(oura_details)
+    @property
+    def state(self) -> Dict:
+        """Get current state (for backward compatibility)"""
+        return self._cache
 
 
 # ==============================================================================
 # Main Daemon
 # ==============================================================================
 class LifeOSDaemon:
-    """Main daemon process - SSOT Writer"""
-    VERSION = "5.0.0"
+    """Main daemon process - DB-centric SSOT Writer"""
+    VERSION = "6.2.8"
     SHADOW_HR_SAVE_INTERVAL = 60
     def __init__(self):
         config_path = get_config_path()
@@ -1636,16 +1395,17 @@ class LifeOSDaemon:
         self.logger.info("=" * 60)
         self.logger.info(f"Life OS Daemon v{self.VERSION} Starting...")
         self.logger.info(f"Root Path: {ROOT_PATH}")
-        self.logger.info(f"State Path: {get_state_path()}")
-        self.logger.info("v5.0.0: SSOT Writer + Command Queue")
+        self.logger.info(f"DB Path: {get_db_path()}")
+        self.logger.info("DB-centric SSOT Architecture")
         self.logger.info("=" * 60)
-        self.state = StateManager(get_state_path(), self.logger)
-        self.state.load()
         try:
             self.db = LifeOSDatabase(str(get_db_path()), self.logger)
         except Exception as e:
             self.logger.error(f"Database init failed: {e}")
             self.db = None
+            sys.exit(1)
+        self.state = StateManager(self.db, self.logger)
+        self.state.load()
         system_config = self.config.get('system', {})
         idle_threshold = system_config.get('idle_threshold_minutes', 10)
         volume = system_config.get('volume', 1.0)
@@ -1660,45 +1420,52 @@ class LifeOSDaemon:
         self._last_shadow_hr_save: Optional[datetime] = None
         self._base_hr = oura_config.get('rhr', 50)
     def _process_command_queue(self):
-        """Process GUI command queue (SSOT: daemon handles all DB writes)"""
-        with self.state._lock:
-            queue = self.state.state.get('command_queue', [])
-            if not queue:
-                return
-            processed = []
-            for cmd in queue:
-                try:
-                    cmd_type = cmd.get('cmd')
-                    ts_str = cmd.get('ts')
-                    ts = datetime.fromisoformat(ts_str) if ts_str else datetime.now(JST)
-                    if cmd_type == 'SHISHA_START':
-                        if self.db:
-                            session_id = self.db.start_shisha_session(ts)
-                            self.state.state['current_shisha_session_id'] = session_id
-                            self.state.state['is_shisha_active'] = True
-                            self.logger.info(f"SHISHA_START: session_id={session_id}")
-                    elif cmd_type == 'SHISHA_END':
-                        session_id = self.state.state.get('current_shisha_session_id')
-                        completed = cmd.get('completed', True)
-                        if self.db and session_id:
-                            self.db.end_shisha_session(session_id, ts, completed)
-                            self.logger.info(f"SHISHA_END: session_id={session_id}, completed={completed}")
-                        self.state.state['current_shisha_session_id'] = None
-                        self.state.state['is_shisha_active'] = False
-                    elif cmd_type == 'SHISHA_RECOVER':
-                        if self.db:
-                            incomplete = self.db.get_incomplete_shisha_session()
-                            if incomplete:
-                                self.db.end_shisha_session(incomplete['id'], ts, completed=False)
-                                self.logger.info(f"SHISHA_RECOVER: closed session {incomplete['id']}")
-                    processed.append(cmd)
-                except Exception as e:
-                    self.logger.error(f"Command processing error: {cmd} - {e}")
-                    processed.append(cmd)
-            self.state.state['command_queue'] = [c for c in queue if c not in processed]
-        self.state.save()
+        """Process commands from DB command_queue"""
+        if not self.db:
+            return
+        commands = self.db.pop_commands()
+        if not commands:
+            return
+        for cmd in commands:
+            try:
+                cmd_type = cmd.get('cmd', '')
+                ts_str = cmd.get('timestamp')
+                ts = datetime.fromisoformat(ts_str) if ts_str else now_jst()
+                value = cmd.get('value')
+                if cmd_type == CommandType.SHISHA_START.value or cmd_type == 'SHISHA_START':
+                    session_id = self.db.start_shisha_session(ts)
+                    self.state.update(current_shisha_session_id=session_id, is_shisha_active=True)
+                    self.logger.info(f"SHISHA_START: session_id={session_id}")
+                elif cmd_type == CommandType.SHISHA_STOP.value or cmd_type == 'SHISHA_END':
+                    session_id = self.state.state.get('current_shisha_session_id')
+                    completed = value if value is not None else True
+                    if session_id:
+                        self.db.end_shisha_session(session_id, ts, completed)
+                        self.logger.info(f"SHISHA_STOP: session_id={session_id}, completed={completed}")
+                    self.state.update(current_shisha_session_id=None, is_shisha_active=False)
+                elif cmd_type == 'SHISHA_RECOVER':
+                    incomplete = self.db.get_incomplete_shisha_session()
+                    if incomplete:
+                        self.db.end_shisha_session(incomplete['id'], ts, completed=False)
+                        self.logger.info(f"SHISHA_RECOVER: closed session {incomplete['id']}")
+                elif cmd_type == CommandType.WAKE_MONITORS.value or cmd_type == 'WAKE_MONITORS':
+                    self.state.update(is_sleeping=False)
+                    self.logger.info("WAKE_MONITORS: is_sleeping=False")
+                elif cmd_type == CommandType.SLEEP_DETECTED.value or cmd_type == 'SLEEP_DETECTED':
+                    self.state.update(is_sleeping=True)
+                    self.logger.info("SLEEP_DETECTED: is_sleeping=True")
+                elif cmd_type == CommandType.SET_GUI_RUNNING.value or cmd_type == 'SET_GUI_RUNNING':
+                    self.state.update(gui_running=bool(value))
+                    self.logger.info(f"SET_GUI_RUNNING: {value}")
+                elif cmd_type == CommandType.SET_MUTE.value or cmd_type == 'SET_MUTE':
+                    self.state.update(is_muted=bool(value))
+                    self.logger.info(f"SET_MUTE: {value}")
+                elif cmd_type == CommandType.FORCE_OURA_REFRESH.value or cmd_type == 'FORCE_OURA_REFRESH':
+                    self.logger.info("FORCE_OURA_REFRESH: triggering immediate update")
+            except Exception as e:
+                self.logger.error(f"Command processing error: {cmd_type} - {e}")
     def _update_shadow_hr(self, brain_state: Dict) -> Dict:
-        """Calculate and persist Shadow HR prediction"""
+        """Calculate Shadow HR prediction and persist to DB (60s interval)"""
         if not self.shadow_hr:
             return brain_state
         try:
@@ -1712,7 +1479,7 @@ class LifeOSDaemon:
             last_hr_ts = None
             if hr_stream:
                 last_entry = hr_stream[-1] if hr_stream else None
-                if last_entry and last_entry.get('source') != 'shadow':
+                if last_entry and last_entry.get('source') == 'oura':
                     try:
                         last_hr_ts = datetime.fromisoformat(last_entry['timestamp'])
                     except:
@@ -1723,11 +1490,12 @@ class LifeOSDaemon:
                 estimated_hr = self.shadow_hr.predict(self._base_hr, apm, mouse_px / 60.0, work_hours)
                 brain_state['estimated_hr'] = estimated_hr
                 brain_state['is_hr_estimated'] = True
-                should_save = (self._last_shadow_hr_save is None or 
-                              (now - self._last_shadow_hr_save).total_seconds() >= self.SHADOW_HR_SAVE_INTERVAL)
-                if should_save and self.db:
-                    self.db.log_heartrate_stream([{'timestamp': now.isoformat(), 'bpm': estimated_hr, 'source': 'shadow'}])
-                    self._last_shadow_hr_save = now
+                if self.db:
+                    should_save = (self._last_shadow_hr_save is None or (now - self._last_shadow_hr_save).total_seconds() >= 60)
+                    if should_save:
+                        self.db.log_shadow_hr(now, int(estimated_hr))
+                        self._last_shadow_hr_save = now
+                        self.logger.debug(f"Shadow HR persisted: {estimated_hr} bpm")
             else:
                 brain_state['estimated_hr'] = current_hr
                 brain_state['is_hr_estimated'] = False
@@ -1798,10 +1566,9 @@ class LifeOSDaemon:
             
             self.db.upsert_daily_log(db_data)
             
-            hr_stream = details.get('hr_stream', [])
+            hr_stream = details.get('hr_stream_full') or details.get('hr_stream', [])
             if hr_stream:
                 try:
-                    # SSOT: log_heartrate_stream内でshadow自動削除が実行される
                     saved = self.db.log_heartrate_stream(hr_stream, auto_purge_shadow=True)
                     if saved > 0:
                         self.logger.debug(f"Persisted {saved} HR records (shadow auto-purged)")
@@ -1846,15 +1613,19 @@ class LifeOSDaemon:
                 score_result = self.oura.get_daily_readiness()
                 score = score_result[0] if score_result[0] else 70
                 is_today = score_result[1] if len(score_result) > 1 else True
-                
                 details, _ = self.oura.get_detailed_data()
                 self._save_to_database(score, details)
+                historical = self.oura.fetch_historical_sleep(30)
+                for record in historical:
+                    try:
+                        self.db.upsert_daily_log(record)
+                    except Exception:
+                        pass
             except Exception as e:
                 self.logger.error(f"Initial Oura fetch failed: {e}")
         
         mode = self._determine_mode(score)
         self._set_next_break(mode)
-        
         self.state.update(
             daemon_running=True,
             daemon_pid=os.getpid(),
@@ -1863,26 +1634,25 @@ class LifeOSDaemon:
             current_mode=mode,
             is_data_effective_today=is_today
         )
-        
+        initial_brain_state = self.telemetry.get_current_state()
+        self.state.update_brain_state(initial_brain_state)
+        self._process_command_queue()
         last_oura_update = datetime.now()
-        
         try:
             while True:
                 loop_start = datetime.now()
-                
+                self._process_command_queue()
                 self.state.load()
-                
-                # Check GUI status
                 if not self.state.state.get('gui_running', True):
                     self.logger.info("GUI closed. Shutting down...")
                     break
-                
+                momentum = self.monitor.get_momentum_minutes()
+                brain_state = self.telemetry.get_current_state()
+                brain_state = self._update_shadow_hr(brain_state)
+                self.state.update_brain_state(brain_state)
                 self.voice.set_mute(self.state.state.get('is_muted', False))
-                
                 present = self.monitor.is_user_present()
                 self.sched.check_and_execute(present)
-                
-                # Auto-update next break
                 nb_ts = self.state.state.get('next_break_timestamp')
                 if nb_ts:
                     try:
@@ -1919,25 +1689,16 @@ class LifeOSDaemon:
                             )
                     except Exception as e:
                         self.logger.error(f"Oura update failed: {e}")
-                    
                     last_oura_update = datetime.now()
-                
-                # Update state
-                momentum = self.monitor.get_momentum_minutes()
-                brain_state = self.telemetry.get_current_state()
-                brain_state = self._update_shadow_hr(brain_state)
                 last_activity_iso = self.monitor.last_activity.replace(tzinfo=JST).isoformat()
-                self._process_command_queue()
-                self.state.update_brain_state(brain_state)
                 self.state.update(
                     user_present=present,
                     idle_seconds=self.monitor.get_idle_time(),
                     momentum_minutes=momentum,
                     last_activity_iso=last_activity_iso
                 )
-                
                 elapsed = (datetime.now() - loop_start).total_seconds()
-                sleep_time = max(0.1, 5 - elapsed)
+                sleep_time = max(0.1, 1 - elapsed)
                 time.sleep(sleep_time)
         
         except KeyboardInterrupt:
