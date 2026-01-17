@@ -1,26 +1,58 @@
 {
   "oura": {
     "api_token": "YOUR_OURA_API_TOKEN_HERE",
-    "rhr": 45
+    "rhr": 55
+  },
+  "bio_feedback": {
+    "break": {
+      "enabled": true,
+      "interval_minutes": 90
+    }
+  },
+  "shisha": {
+    "ignition_time": 930,
+    "ventilation_time": 240,
+    "heat_soak_time": 510,
+    "calibration_time": 180,
+    "cruise_time": 3000
   },
   "audio": {
     "enabled": true,
-    "bgm_volume": 0.08,
-    "ambient_volume": 0.15,
-    "voice_volume": 0.5,
-    "state_inertia_seconds": 30
+    "bgm_enabled": true,
+    "ambient_enabled": true,
+    "voice_enabled": false,
+    "bgm_volume": 0.3,
+    "ambient_volume": 0.2,
+    "voice_volume": 0.8,
+    "duck_ratio": 0.3,
+    "state_inertia_seconds": 30,
+    "idle_threshold_sec": 900,
+    "voice_cooldown_sec": 300
   },
   "home": {
-    "hue_bridge_ip": "",
-    "hue_room": "Office",
+    "hue_ip": "",
     "bravia_ip": "",
-    "bravia_psk": ""
+    "bravia_psk": "",
+    "kirigamine_ip": "",
+    "kirigamine_bedroom_ip": "",
+    "switchbot_token": "",
+    "switchbot_secret": "",
+    "switchbot_living_device_id": "",
+    "switchbot_bedroom_device_id": "",
+    "switchbot_co2_device_id": "",
+    "sleep_detection_enabled": false,
+    "sleep_detection_room": "",
+    "sleep_detection_minutes": 1.0,
+    "focus_keep_rooms": [],
+    "hide_zone_members": false
   },
   "openai": {
-    "api_key": ""
+    "enabled": false,
+    "api_key": "",
+    "voice": "nova"
   },
-  "shisha": {
-    "voice_enabled": true,
-    "voice_actor": "shimmer"
+  "system": {
+    "volume": 1.0,
+    "idle_threshold_minutes": 10
   }
 }

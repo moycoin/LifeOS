@@ -10,7 +10,7 @@ import struct
 import threading
 import time
 import wave
-from collections import Counter, deque
+from collections import Counter, deque, OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -42,7 +42,7 @@ class AudioConstants:
     CHANNELS = 2
     MAX_AMPLITUDE = 32767
     MIN_AMPLITUDE = -32768
-    DURATION_SECONDS = 300
+    DURATION_SECONDS = 150
     FADE_DURATION_MS = 500
     FADE_SAMPLES = int(SAMPLE_RATE * FADE_DURATION_MS / 1000)
     CHUNK_SECONDS = 10
@@ -414,7 +414,7 @@ class NeuroLinguisticCompiler:
             with wave.open(str(out_path), 'w') as wav_out:
                 wav_out.setnchannels(2); wav_out.setsampwidth(2); wav_out.setframerate(sr)
                 wav_out.writeframes(stereo.tobytes())
-            print(f"[NLC] Compiled: {text[:20]}... → {file_hash}.wav")
+            print(f"[NLC] Compiled: {text[:20]}... â†’ {file_hash}.wav")
             return out_path
         except Exception as e:
             print(f"[NLC] Compile failed: {e}"); return None
@@ -443,7 +443,7 @@ class NeuroLinguisticCompiler:
             with wave.open(str(output_path), 'w') as wav_out:
                 wav_out.setnchannels(2); wav_out.setsampwidth(2); wav_out.setframerate(sr)
                 wav_out.writeframes(stereo.tobytes())
-            print(f"[NLC] Modulated: {input_path.name} → {output_path.name}")
+            print(f"[NLC] Modulated: {input_path.name} â†’ {output_path.name}")
             return True
         except Exception as e:
             print(f"[NLC] Modulate failed: {e}"); return False
@@ -547,7 +547,8 @@ class NeuroSoundEngine:
         default_config = {'enabled': True, 'master_volume': 1.0, 'bgm_enabled': True, 'bgm_volume': 0.08, 'voice_enabled': True, 'voice_volume': 0.6, 'sfx_volume': 0.5, 'headphone_mode': True, 'device_type': 'headphone', 'bas_enabled': False, 'fade_duration_ms': 10000, 'duck_ratio': 0.3, 'voice_cooldown_sec': 5, 'state_inertia_seconds': 30, 'ambient_slots': [], 'learning_volume_ratio': 0.6}
         self.config = {**default_config, **(config.get('audio', config) if config and isinstance(config.get('audio', config), dict) else {})} if config else default_config
         self._bgm_channel_a, self._bgm_channel_b = None, None
-        self._bgm_sound_cache: Dict[str, 'pygame.mixer.Sound'] = {}
+        self._bgm_sound_cache: OrderedDict[str, 'pygame.mixer.Sound'] = OrderedDict()
+        self._bgm_cache_maxsize = 3
         self._active_channel = 'A'
         self._bgm_lock = threading.Lock()
         self._bgm_request_queue: List[Tuple[str, int]] = []
@@ -657,21 +658,21 @@ class NeuroSoundEngine:
             self._start_bgm_worker()
         except Exception as e: print(f"!!! MIXER INIT FAILED: {e}"); self._mixer_initialized = False
     def _preload_bgm_cache(self):
-        for bgm_file in self.MODE_BGM_MAP.values():
-            if bgm_file:
-                path = self.bgm_path / bgm_file
-                if path.exists() and bgm_file not in self._bgm_sound_cache:
-                    try:
-                        self._bgm_sound_cache[bgm_file] = pygame.mixer.Sound(str(path))
-                    except: pass
-        print(f"[Audio] BGM cache: {len(self._bgm_sound_cache)} files")
+        print(f"[Audio] On-demand loading enabled (LRU cache: max {self._bgm_cache_maxsize} files)")
+    def _evict_lru_cache(self):
+        while len(self._bgm_sound_cache) > self._bgm_cache_maxsize:
+            evicted_key, _ = self._bgm_sound_cache.popitem(last=False)
+            print(f"[Audio] LRU evicted: {evicted_key}")
     def _get_cached_sound(self, bgm_file: str) -> 'pygame.mixer.Sound':
         if bgm_file in self._bgm_sound_cache:
+            self._bgm_sound_cache.move_to_end(bgm_file)
             return self._bgm_sound_cache[bgm_file]
         path = self.bgm_path / bgm_file
         if path.exists():
             sound = pygame.mixer.Sound(str(path))
             self._bgm_sound_cache[bgm_file] = sound
+            self._evict_lru_cache()
+            print(f"[Audio] On-demand loaded: {bgm_file} (cache: {len(self._bgm_sound_cache)}/{self._bgm_cache_maxsize})")
             return sound
         return None
     def _start_bgm_worker(self):
@@ -680,7 +681,7 @@ class NeuroSoundEngine:
         self._bgm_worker_thread = threading.Thread(target=self._bgm_worker_loop, daemon=True, name="BGM-Worker")
         self._bgm_worker_thread.start()
     def _bgm_worker_loop(self):
-        """Protocol 2: LIFO Queue Compression - 最新のリクエストのみ処理"""
+        """Protocol 2: LIFO Queue Compression - æœ€æ–°ã®ãƒªã‚¯ã‚¨ã‚¹ãƒˆã®ã¿å‡¦ç†"""
         while not self._bgm_worker_stop.is_set():
             try:
                 target_file, fade_ms = None, None
@@ -695,7 +696,7 @@ class NeuroSoundEngine:
                 print(f"[Audio] BGM worker error: {e}")
                 time.sleep(0.2)
     def _check_new_request(self) -> bool:
-        """Protocol 3: キューに新しいリクエストがあるかチェック（Early Exit用）"""
+        """Protocol 3: ã‚­ãƒ¥ãƒ¼ã«æ–°ã—ã„ãƒªã‚¯ã‚¨ã‚¹ãƒˆãŒã‚ã‚‹ã‹ãƒã‚§ãƒƒã‚¯ï¼ˆEarly Exitç”¨ï¼‰"""
         with self._bgm_lock:
             return len(self._bgm_request_queue) > 0
     def _execute_crossfade(self, new_bgm_file: str, fade_ms: int = None):
@@ -754,7 +755,7 @@ class NeuroSoundEngine:
             self._active_channel = next_channel
             self.current_bgm_file = new_bgm_file
             self._bgm_current_volume = target_vol
-            direction = "↑" if fade_ms <= 10000 else "↓"
+            direction = "â†‘" if fade_ms <= 10000 else "â†“"
             print(f"[Audio] Crossfade {direction} ({fade_ms/1000:.0f}s): {new_bgm_file} (Ch {next_channel})")
         except Exception as e:
             print(f"!!! CROSSFADE FAILED: {e}")
@@ -828,7 +829,7 @@ class NeuroSoundEngine:
     def get_mode_for_state(self, state: str) -> str:
         return self.STATE_MODE_MAP.get(state, 'FLOW')
     def _calculate_transition_fade_ms(self, from_mode: str, to_mode: str) -> int:
-        """Protocol 2: 生物学的遷移時間の計算"""
+        """Protocol 2: ç”Ÿç‰©å­¦çš„é·ç§»æ™‚é–“ã®è¨ˆç®—"""
         from_level = self.MODE_AROUSAL_LEVEL.get(from_mode, 3)
         to_level = self.MODE_AROUSAL_LEVEL.get(to_mode, 3)
         diff = to_level - from_level

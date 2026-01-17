@@ -251,9 +251,18 @@ class BioEngine:
     }
     
     # FP計算・予測の一元化定数
-    DEBT_PENALTY_MULTIPLIER = 3.0   # 負債ペナルティ係数（5.0→3.0に緩和）
-    BREAK_RECOMMEND_THRESHOLD = 20.0  # 休憩推奨FP閾値（30→20に緩和）
-    BEDTIME_THRESHOLD = 10.0        # 活動限界FP閾値（15→10に緩和）
+    DEBT_PENALTY_MULTIPLIER = 2.0   # FIXED: 負債ペナルティ係数（3.0→2.0に緩和）
+    BREAK_RECOMMEND_THRESHOLD = 20.0  # 休憩推奨FP閾値
+    BEDTIME_THRESHOLD = 10.0        # 活動限界FP閾値
+    
+    # FIXED: debt増減パラメータ
+    DEBT_ACCUM_RATE = 0.0005        # 負債蓄積速度（0.001→0.0005に半減）
+    DEBT_REPAY_THRESHOLD = 10.0     # 返済開始boost閾値（2→10に緩和）
+    DEBT_REPAY_MULTIPLIER = 2.0     # 返済速度倍率
+    
+    # FIXED: FP平滑化パラメータ
+    FP_EMA_ALPHA = 0.15             # EMA係数（低=滑らか、高=追従）
+    IDLE_DECAY_FACTOR = 0.1         # IDLE時のdecay抑制率
     
     # 活動状態ごとのブースト効率
     ACTIVITY_EFFICIENCY = {
@@ -266,10 +275,10 @@ class BioEngine:
     
     # 連続作業による減衰加速
     WORK_DECAY_MULTIPLIERS = {
-        2.0: 1.2,
-        3.0: 1.5,
-        4.0: 1.8,
-        5.0: 2.0,
+        2.0: 1.1,   # FIXED: 1.2→1.1
+        3.0: 1.3,   # FIXED: 1.5→1.3
+        4.0: 1.5,   # FIXED: 1.8→1.5
+        5.0: 1.7,   # FIXED: 2.0→1.7
     }
     
     def __init__(
@@ -930,18 +939,23 @@ class BioEngine:
         work_multiplier = self._get_work_decay_multiplier()
         self.correction_factor = self._calculate_correction_factor(apm, backspace_count)
         friction_multiplier = 1.0 + (1.0 - self.correction_factor) * 2.0
-        effective_decay = self._cached_decay_rate * work_multiplier * (1 + self.debt * 0.1) * f_hr * friction_multiplier
-        self.base_fp = self.base_fp * math.exp(-effective_decay * dt_hours)
+        # FIXED: IDLE時はdecay大幅抑制
+        idle_factor = self.IDLE_DECAY_FACTOR if self.activity_state == ActivityState.IDLE else 1.0
+        effective_decay = (self._cached_decay_rate * work_multiplier * 
+                         (1 + self.debt * 0.05) * f_hr * friction_multiplier * idle_factor)  # debt係数0.1→0.05
+        # FIXED: EMA平滑化適用
+        raw_fp = self.base_fp * math.exp(-effective_decay * dt_hours)
+        self.base_fp = self.base_fp * (1 - self.FP_EMA_ALPHA) + raw_fp * self.FP_EMA_ALPHA
         self.base_fp = max(5, self.base_fp)
         intensity = min(1.0, (apm / 100 + mouse_pixels / 5000)) / 2
         capacity = max(0, (self.readiness - 40) / 60)
         efficiency = self.ACTIVITY_EFFICIENCY.get(self.activity_state, 0.5)
         self.target_boost_fp = intensity * efficiency * capacity * self.correction_factor * 50.0
+        # FIXED: debt増減速度緩和
         if self.boost_fp > 5:
-            base_accumulation = self.boost_fp * 0.001 * dt_seconds
-            self.debt += base_accumulation * f_hr
-        elif self.boost_fp < 2:
-            repayment_rate = self._get_dynamic_repayment_rate()
+            self.debt += self.boost_fp * self.DEBT_ACCUM_RATE * dt_seconds * f_hr
+        elif self.boost_fp < self.DEBT_REPAY_THRESHOLD:
+            repayment_rate = self._get_dynamic_repayment_rate() * self.DEBT_REPAY_MULTIPLIER
             repayment_penalty = 1.0 / f_hr
             self.debt -= repayment_rate * dt_seconds * repayment_penalty
         self.debt = max(0, min(10.0, self.debt))

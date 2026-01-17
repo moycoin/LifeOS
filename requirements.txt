@@ -1,14 +1,20 @@
-# LifeOS Dependencies
-# Python 3.7+ required (3.8+ syntax NOT supported)
+# LifeOS v6.2.0 Dependencies
 
-# Core - Required
+# Core GUI
 PyQt5>=5.15.0
+
+# Audio Engine
 pygame>=2.0.0
-numpy>=1.19.0
-requests>=2.25.0
+numpy>=1.20.0
+
+# Input Monitoring
 pynput>=1.7.0
 
-# Optional - Enhanced features
-scipy>=1.5.0          # Advanced signal processing
-phue>=1.1             # Philips Hue integration
-openai>=0.27.0        # Voice synthesis (TTS)
+# API Communication
+requests>=2.25.0
+
+# Optional: Advanced Audio Processing
+scipy>=1.7.0
+
+# Optional: Philips Hue Integration
+phue>=1.1

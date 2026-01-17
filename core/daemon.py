@@ -19,19 +19,16 @@ try:
     PYGAME_AVAILABLE = True
 except ImportError:
     PYGAME_AVAILABLE = False
-    print("[daemon] pygame not available - audio disabled")
 try:
     import requests
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-    print("[daemon] requests not available - Oura API disabled")
 try:
     from pynput import mouse, keyboard as pynput_keyboard
     PYNPUT_AVAILABLE = True
 except ImportError:
     PYNPUT_AVAILABLE = False
-    print("[daemon] pynput not available - input monitoring disabled")
 def get_root_path() -> Path:
     return Path(__file__).parent.parent.resolve()
 ROOT_PATH = get_root_path()
@@ -618,9 +615,8 @@ class InputTelemetry:
             sleep_score = oura_details.get('sleep_score')
             if sleep_score:
                 self._telemetry_engine.set_sleep_score(sleep_score)
-            rhr = oura_details.get('true_rhr')
-            if rhr:
-                self._telemetry_engine.set_baseline_hr(rhr)
+            rhr = oura_details.get('true_rhr') or 50
+            self._telemetry_engine.set_baseline_hr(rhr)
             wake_anchor_iso = oura_details.get('wake_anchor_iso')
             if wake_anchor_iso:
                 try:
@@ -841,45 +837,45 @@ class OuraAPIClient:
             
             hr_points.sort(key=lambda x: x.timestamp)
             result['hr_stream'] = hr_points
-            
             if not all_bpms:
                 return result
-            
-            min_bpm = min(all_bpms)
-            result['true_rhr'] = min_bpm
-            result['min_bpm'] = min_bpm
+            result['min_bpm'] = min(all_bpms)
             result['max_bpm'] = max(all_bpms)
-            
-            for point in hr_points:
-                if point.bpm == min_bpm:
-                    result['true_rhr_time'] = point.timestamp.strftime('%H:%M')
-                    break
-            
             if hr_points:
                 latest = hr_points[-1]
                 result['current_hr'] = latest.bpm
                 result['current_hr_time'] = latest.timestamp.strftime('%H:%M')
-            
-            # Wake anchor detection
             wake_anchor = self._detect_wake_anchor(hr_points)
             result['wake_anchor'] = wake_anchor
-            
-            # Main sleep calculation
+            true_rhr = None
+            true_rhr_time = None
             if wake_anchor:
+                sleep_window_start = (wake_anchor - timedelta(hours=18)).replace(hour=12, minute=0, second=0, microsecond=0)
+                recent_sleep_rest = [(p.bpm, p.timestamp) for p in hr_points if p.source == 'rest' and sleep_window_start <= p.timestamp < wake_anchor]
+                if recent_sleep_rest:
+                    min_tuple = min(recent_sleep_rest, key=lambda x: x[0])
+                    true_rhr = min_tuple[0]
+                    true_rhr_time = min_tuple[1].strftime('%H:%M')
+                    self.logger.info(f"True RHR (recent sleep): {true_rhr} bpm at {true_rhr_time}")
                 main_sleep = self._calculate_main_sleep(hr_points, wake_anchor)
                 result['main_sleep_seconds'] = main_sleep
-            
-            # Nap analysis
-            if wake_anchor:
-                nap_result = self._analyze_naps(hr_points, wake_anchor, min_bpm)
+                nap_result = self._analyze_naps(hr_points, wake_anchor, true_rhr if true_rhr else result['min_bpm'])
                 result['nap_segments'] = nap_result['segments']
                 result['total_nap_minutes'] = nap_result['total_minutes']
                 result['recovery_score'] = nap_result['recovery_score']
-            
-            # Max continuous rest
+            if not true_rhr:
+                now_local = datetime.now(JST)
+                today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                today_rest = [(p.bpm, p.timestamp) for p in hr_points if p.source == 'rest' and p.timestamp >= today_start]
+                if today_rest:
+                    min_tuple = min(today_rest, key=lambda x: x[0])
+                    true_rhr = min_tuple[0]
+                    true_rhr_time = min_tuple[1].strftime('%H:%M')
+                    self.logger.info(f"True RHR (today fallback): {true_rhr} bpm at {true_rhr_time}")
+            result['true_rhr'] = true_rhr
+            result['true_rhr_time'] = true_rhr_time
             max_rest = self._calculate_max_continuous_rest(hr_points)
             result['max_continuous_rest_seconds'] = max_rest
-            
             return result
         
         except Exception as e:
@@ -1383,13 +1379,14 @@ class StateManager:
 # ==============================================================================
 class LifeOSDaemon:
     """Main daemon process - DB-centric SSOT Writer"""
-    VERSION = "6.2.8"
+    VERSION = "6.2.14"
     SHADOW_HR_SAVE_INTERVAL = 60
+    BRAIN_METRICS_SAVE_INTERVAL = 60
     def __init__(self):
         config_path = get_config_path()
         self.config = safe_read_json(config_path, {}, None)
         if not self.config:
-            print(f"ERROR: Failed to load config from {config_path}")
+            logging.error(f"Failed to load config from {config_path}")
             sys.exit(1)
         self.logger = setup_logger()
         self.logger.info("=" * 60)
@@ -1418,6 +1415,7 @@ class LifeOSDaemon:
         self.telemetry = InputTelemetry(self.db, self.logger)
         self.shadow_hr = ShadowHeartrate(get_state_path()) if SHADOW_HR_AVAILABLE else None
         self._last_shadow_hr_save: Optional[datetime] = None
+        self._last_brain_metrics_save: Optional[datetime] = None
         self._base_hr = oura_config.get('rhr', 50)
     def _process_command_queue(self):
         """Process commands from DB command_queue"""
@@ -1649,7 +1647,13 @@ class LifeOSDaemon:
                 momentum = self.monitor.get_momentum_minutes()
                 brain_state = self.telemetry.get_current_state()
                 brain_state = self._update_shadow_hr(brain_state)
-                self.state.update_brain_state(brain_state)
+                now = datetime.now()
+                if self._last_brain_metrics_save is None or (now - self._last_brain_metrics_save).total_seconds() >= self.BRAIN_METRICS_SAVE_INTERVAL:
+                    self.state.update_brain_state(brain_state)
+                    self._last_brain_metrics_save = now
+                else:
+                    with self.state._lock:
+                        self.state._cache['brain_state'] = brain_state
                 self.voice.set_mute(self.state.state.get('is_muted', False))
                 present = self.monitor.is_user_present()
                 self.sched.check_and_execute(present)
@@ -1726,7 +1730,7 @@ class LifeOSDaemon:
 if __name__ == "__main__":
     is_running, existing_pid = is_daemon_running()
     if is_running:
-        print(f"Daemon already running (PID: {existing_pid})")
+        logging.warning(f"Daemon already running (PID: {existing_pid})")
         sys.exit(1)
     
     LifeOSDaemon().run()
